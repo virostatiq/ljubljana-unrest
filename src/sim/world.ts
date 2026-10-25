@@ -662,13 +662,20 @@ export class World {
 			const S = g.snatchPlan, p = g.snatch.leaderPos;
 			g.arrestAt = p;
 			this.crowd.setGroup( g.id, { ax: p[ 0 ], ay: p[ 1 ] } );
+			if ( g.snatchFieldPending ) continue;
 			if ( S.field && Math.hypot( p[ 0 ] - S.field[ 0 ], p[ 1 ] - S.field[ 1 ] ) <= SNATCH_FIELD ) continue;
 			if ( now - S.fieldAt < SNATCH_REFIELD ) continue;
-			S.field = p;
 			S.fieldAt = now;
+			const at = [ ...p ];
 			let field;
 			try { field = this.fieldTo( p[ 0 ], p[ 1 ], SNATCH_FIELD ); } catch { continue; } // pool full: run straight at them for now
-			field.then( ( L ) => { if ( g.snatchPlan === S ) this.setLayer( g, L ); } );
+			g.snatchFieldPending = true;
+			field.then( ( layer ) => {
+
+				if ( g.snatchPlan !== S ) return;
+				this.setLayer( g, layer ); S.field = at;
+
+			}, () => {} ).finally( () => { g.snatchFieldPending = false; } );
 
 		}
 

@@ -2,6 +2,16 @@ import { check, fields } from './definition.ts';
 import { custodyOptions } from './custody.ts';
 
 const catalog = Object.freeze( {
+	hold: Object.freeze( { key: 'h', label: 'Hold', needsSelection: true, escalation: 0, immediate: true, side: 'protest' } ),
+	sit: Object.freeze( { key: 's', label: 'Sit down / stand up', needsSelection: true, escalation: 0, immediate: true, side: 'protest' } ),
+	shield: Object.freeze( { key: 'b', label: 'Shield wall', needsSelection: true, escalation: 0, immediate: true, side: 'protest' } ),
+	scatter: Object.freeze( { key: 'w', label: 'Be water', needsSelection: true, escalation: 0, side: 'protest' } ),
+	disperse: Object.freeze( { key: 'd', label: 'Disperse', needsSelection: true, escalation: 0, immediate: true, side: 'protest' } ),
+	'fire-up': Object.freeze( { key: 'e', label: 'Fire up', needsSelection: true, escalation: 0, immediate: true, side: 'protest' } ),
+	calm: Object.freeze( { key: 'q', label: 'Calm down', needsSelection: true, escalation: 0, immediate: true, side: 'protest' } ),
+	umbrella: Object.freeze( { key: 'u', label: 'Umbrellas', needsSelection: true, escalation: 0, immediate: true, side: 'protest' } ),
+	split: Object.freeze( { key: 'v', label: 'Split', needsSelection: true, escalation: 0, immediate: true, side: 'protest' } ),
+	merge: Object.freeze( { key: 'm', label: 'Merge', needsSelection: true, escalation: 0, immediate: true, side: 'protest' } ),
 	charge: Object.freeze( { key: 'c', label: 'Charge', needsSelection: true, escalation: 1 } ),
 	arrest: Object.freeze( { key: 'a', label: 'Arrest', needsSelection: true, escalation: 0 } ),
 	snatch: Object.freeze( { key: 'x', label: 'Snatch leader', needsSelection: true, escalation: 0 } ),
@@ -34,17 +44,53 @@ export function policeCommands( options = {} ) {
 
 }
 
+export function protestCommands( options = {} ) {
+
+	fields( options, [ 'umbrella' ], 'protestCommands' );
+	const commands = [ 'hold', 'sit', 'shield', 'scatter', 'disperse', 'fire-up', 'calm', 'split', 'merge' ].map( ( id ) => Object.freeze( { kind: 'protest-command', id, resource: null } ) );
+	if ( options.umbrella !== undefined ) {
+
+		check( typeof options.umbrella === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test( options.umbrella ), 'protestCommands.umbrella', 'must be a resource ID' );
+		commands.push( Object.freeze( { kind: 'protest-command', id: 'umbrella', resource: options.umbrella } ) );
+
+	}
+	return Object.freeze( commands );
+
+}
+
+export function scenarioCommand( options ) {
+
+	fields( options, [ 'id', 'key', 'label', 'resource', 'selection', 'side' ], 'scenarioCommand' );
+	check( typeof options.id === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test( options.id ) && ! Object.hasOwn( catalog, options.id ), 'scenarioCommand.id', 'must be a non-standard command slug' );
+	check( typeof options.key === 'string' && /^[a-z]$/.test( options.key ), 'scenarioCommand.key', 'must be a lowercase letter' );
+	check( typeof options.label === 'string' && options.label.trim() !== '' && options.label.length <= 80, 'scenarioCommand.label', 'must be non-empty text up to 80 characters' );
+	check( [ undefined, false, 'crowd', 'squad', 'vehicle' ].includes( options.selection ), 'scenarioCommand.selection', 'unsupported selection kind' );
+	check( options.side === undefined || [ 'police', 'protest' ].includes( options.side ), 'scenarioCommand.side', 'must be police or protest' );
+	check( options.resource === undefined || typeof options.resource === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test( options.resource ), 'scenarioCommand.resource', 'must be a resource ID' );
+	return Object.freeze( { kind: 'scenario-command', id: options.id, key: options.key, label: options.label, side: options.side,
+		selection: options.selection, resource: options.resource ?? null, needsSelection: Boolean( options.selection ), escalation: 0 } );
+
+}
+
 export function commandDefinitions( values: readonly any[] = [], resources ) {
 
-	check( Array.isArray( values ) && Array.from( values ).every( ( value ) => value?.kind === 'police-command' ), 'commands', 'must be a dense array of supported command definitions' );
+	check( Array.isArray( values ) && Array.from( values ).every( ( value ) => [ 'police-command', 'protest-command', 'scenario-command' ].includes( value?.kind ) ), 'commands', 'must be a dense array of supported command definitions' );
 	const commands = values.map( ( value ) => {
 
+		if ( value.kind === 'scenario-command' ) {
+
+			const { kind, needsSelection, escalation, resource, custody, ...options } = value;
+			const result = scenarioCommand( { ...options, ...( resource === null ? {} : { resource } ) } );
+			check( result.resource === null || Object.hasOwn( resources, result.resource ), `command.${result.id}.resource`, 'unknown resource' ); return Object.freeze( { ...result, custody: undefined } );
+
+		}
 		fields( value, [ 'kind', 'id', 'resource', 'custody' ], 'command' );
 		check( Object.hasOwn( catalog, value.id ), 'command.id', 'unknown police command' );
+		check( ( catalog[ value.id ].side === 'protest' ) === ( value.kind === 'protest-command' ), 'command.kind', 'does not match command side' );
 		check( value.custody === undefined || value.id === 'arrest', `command.${value.id}.custody`, 'only the arrest command takes custody options' );
-		if ( [ 'gas', 'reinforce', 'water' ].includes( value.id ) ) check( typeof value.resource === 'string' && Object.hasOwn( resources, value.resource ), `command.${value.id}.resource`, 'must refer to a declared resource' );
+		if ( [ 'gas', 'reinforce', 'water', 'umbrella' ].includes( value.id ) ) check( typeof value.resource === 'string' && Object.hasOwn( resources, value.resource ), `command.${value.id}.resource`, 'must refer to a declared resource' );
 		else check( value.resource === null, `command.${value.id}.resource`, 'this standard command has no resource cost' );
-		return Object.freeze( { kind: 'police-command', id: value.id, resource: value.resource,
+		return Object.freeze( { kind: value.kind, id: value.id, resource: value.resource,
 			...( value.custody === undefined ? {} : { custody: custodyOptions( value.custody ) } ) } );
 
 	} );
@@ -150,7 +196,7 @@ export class CommandHost {
 		}
 		const at = this.runtime.location( options.at ), selected = options.selection ?? [];
 		check( Array.isArray( selected ) && Array.from( selected ).every( ( handle ) => handle && typeof handle === 'object' ), 'commands.selection', 'must be a dense array of actor handles' );
-		const selection = Object.freeze( [ ...selected ] ), info = catalog[ id ];
+		const selection = Object.freeze( [ ...selected ] ), info = catalog[ id ] ?? definition;
 		const operationId = `${this.runtime.run}:${this.runtime.nextOperation ++}`;
 		let target = null;
 		const event = ( type, payload = {} ) => this.runtime.event( type, { command: id, operation: operationId, at, selection, source, ...( target ? { target: target.person } : {} ), ...payload } );
@@ -172,9 +218,9 @@ export class CommandHost {
 		for ( const handle of selection ) {
 
 			const actor = this.runtime.actors.get( handle.id );
-			const vehicleSelection = handle.kind === 'vehicle' && ( id === 'water' && actor?.backend?.water === true
+			const vehicleSelection = handle.kind === 'vehicle' && ( info.selection === 'vehicle' || id === 'water' && actor?.backend?.water === true
 				|| id === 'crew' && Boolean( actor?.backend?.crew ) );
-			if ( actor?.handle !== handle || ( [ 'water', 'crew' ].includes( id ) ? ! vehicleSelection : handle.kind !== 'squad' )
+			if ( actor?.handle !== handle || ( [ 'water', 'crew' ].includes( id ) || info.selection === 'vehicle' ? ! vehicleSelection : handle.kind !== ( info.selection || ( info.side === 'protest' ? 'crowd' : 'squad' ) ) )
 				|| ! actor.backend || ! ( this.runtime.actor( handle )?.alive > 0 ) ) return reject( 'INVALID_SELECTION' );
 			if ( this.runtime.transport.locked( handle ) ) return reject( 'BOARDING_PENDING' );
 			if ( this.claims.has( handle ) ) return reject( 'CONTROL_BUSY' );
@@ -208,7 +254,7 @@ export class CommandHost {
 		}
 		const controller = new AbortController();
 		let resolve, done = false, timer;
-		const request = Object.freeze( { id, at, selection, source, operation: operationId, ...( target ? { target } : {} ),
+		const request = Object.freeze( { id, at, selection, source, custom: definition.kind === 'scenario-command', operation: operationId, ...( target ? { target } : {} ),
 			...( options.opinion === undefined ? {} : { opinion: Object.freeze( { delta: options.opinion.delta, reason: options.opinion.reason } ) } ) } );
 		const current = () => ! controller.signal.aborted && ( ! owner || [ 'starting', 'active' ].includes( owner.state ) ) && [ 'starting', 'running', 'paused' ].includes( this.runtime.state )
 			&& actors.every( ( actor ) => this.runtime.actors.get( actor.handle.id ) === actor && this.claims.get( actor.handle ) === operation );

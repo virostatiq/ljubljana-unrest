@@ -1,7 +1,11 @@
 import { Mission } from '../mission.ts';
+import { ORANGE } from '../sdk/colors.ts';
+import { prepareTerrain } from './terrain.ts';
 import { normalizeScenario } from './definition.ts';
 import { ScenarioEngine } from './engine.ts';
 import { ScenarioRuntime, formatTime } from './runtime.ts';
+
+const MARKER_COLORS = { info: 'rgb(43,140,255)', good: 'rgb(79,209,139)', warn: ORANGE, bad: 'rgb(255,45,85)' };
 
 export function scenarioMission( value ) {
 
@@ -13,6 +17,7 @@ export function scenarioMission( value ) {
 		declare started: Promise<void>;
 
 		static id = definition.id;
+		static prepare( city ) { prepareTerrain( city, definition.terrain ); }
 		static title = definition.title;
 		static subtitle = definition.subtitle;
 		static brief = definition.brief;
@@ -131,8 +136,9 @@ export function scenarioMission( value ) {
 
 			if ( ! [ 'running', 'paused' ].includes( this.runtime.state ) ) return;
 			const command = this.runtime.commands.list().find( ( entry ) => entry.id === id );
+			const kind = command.forCars ? 'vehicle' : command.side === 'protest' ? 'crowd' : 'squad';
 			const operation = this.runtime.commands.execute( null, id, { at: [ x, y ],
-				selection: command.needsSelection ? this.selectionHandles( command.forCars ? this.game.cars : this.game.squads, command.forCars ? 'vehicle' : 'squad' ) : [] }, source );
+				selection: command.needsSelection ? this.selectionHandles( command.forCars ? this.game.cars : command.side === 'protest' ? this.game.selected : this.game.squads, kind ) : [] }, source );
 			operation.settled.then( ( outcome: any ) => {
 
 				this.escalation = this.runtime.commands.escalation;
@@ -145,7 +151,7 @@ export function scenarioMission( value ) {
 
 		onCommandBlocked( key ) {
 
-			const command = this.runtime.commands.list().find( ( entry ) => entry.key === key );
+			const command = this.runtime.commands.list().find( ( entry ) => entry.key === key && ( entry.side === 'protest' ) === ( definition.side === 'protest' ) );
 			if ( command && ! command.danger ) return this.executeCommand( command.id, this.game.mouse.x, this.game.mouse.y );
 
 		}
@@ -169,6 +175,11 @@ export function scenarioMission( value ) {
 			try {
 
 				if ( stats ) this._trackOpinion( stats );
+				this.t = this.runtime.time + dt;
+				const due = this.timers.filter( ( timer ) => timer.at <= this.t ); this.timers = this.timers.filter( ( timer ) => timer.at > this.t );
+				for ( const timer of due ) timer.fn();
+				if ( this.shelters.some( ( shelter ) => shelter.until <= this.t ) ) { this.shelters = this.shelters.filter( ( shelter ) => shelter.until > this.t ); this.crowd.setShelter( this.shelters.map( ( shelter ) => shelter.id ) ); }
+				if ( definition.side === 'protest' ) this.fireTick( dt );
 				this.runtime.pause( false );
 				this.runtime.update( dt );
 				this.t = this.runtime.time;
@@ -200,10 +211,9 @@ export function scenarioMission( value ) {
 		commands() {
 
 			const movement = [ { key: 'rmb', label: 'Move', hint: 'right-click', needsSel: true } ];
-			if ( definition.side === 'protest' ) return movement;
 			return [ ...movement,
-				{ key: 'l', label: 'Cordon line', needsSel: true, run: () => this.game.drawLine() },
-				...this.runtime.commands.list().map( ( command ) => ( { key: command.key, label: command.label,
+				...( definition.side === 'police' ? [ { key: 'l', label: 'Cordon line', needsSel: true, run: () => this.game.drawLine() } ] : [] ),
+				...this.runtime.commands.list().filter( ( command ) => ( command.side === 'protest' ) === ( definition.side === 'protest' ) ).map( ( command ) => ( { key: command.key, label: command.label,
 					needsSel: command.needsSelection, resource: command.resource, forCars: command.forCars, forCordon: command.id === 'shield-push', aim: command.aim,
 					danger: command.danger,
 					desc: command.id === 'reinforce' ? 'Dispatch a fresh squad from the nearest police station to this point'
@@ -234,6 +244,19 @@ export function scenarioMission( value ) {
 				const target = this.runtime.spatial.prepareBuilding( objective.target, objective.exitAt );
 				this.drawZone( overlay, ...( target.position as [ number, number ] ), target.radius + 10, state.breach > 0.3 ? 'rgb(255,45,85)' : 'rgb(255,176,32)', target.name, 0.05 + state.breach * 0.2 );
 				target.exits.forEach( ( at, index ) => this.drawZone( overlay, ...( at as [ number, number ] ), 12, state.blocked[ index ] ? 'rgb(255,45,85)' : 'rgb(233,228,216)', `EXIT ${index + 1}` ) );
+
+			}
+			for ( const marker of this.runtime.markers() ) {
+
+				if ( marker.shape ) {
+
+					const ctx = overlay.ctx, color = MARKER_COLORS[ marker.kind ]; ctx.beginPath();
+					marker.points.forEach( ( at, index ) => { const [ x, y ] = overlay.toScreen( at[ 0 ], at[ 1 ] ); if ( index ) ctx.lineTo( x, y ); else ctx.moveTo( x, y ); } );
+					if ( marker.shape === 'polygon' ) { ctx.closePath(); ctx.fillStyle = color.replace( ')', ',0.12)' ).replace( 'rgb', 'rgba' ); ctx.fill(); }
+					ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash( marker.shape === 'path' ? [ 4, 8 ] : [] ); ctx.stroke(); ctx.setLineDash( [] );
+					const [ x, y ] = overlay.toScreen( marker.at[ 0 ], marker.at[ 1 ] ); ctx.fillStyle = color; ctx.font = '600 11px "IBM Plex Mono", monospace'; ctx.textAlign = 'center'; ctx.fillText( marker.label, x, y - 8 );
+
+				} else this.drawZone( overlay, marker.at[ 0 ], marker.at[ 1 ], marker.radius, MARKER_COLORS[ marker.kind ], marker.label );
 
 			}
 			for ( const entity of this.runtime.identity.snapshots ) {

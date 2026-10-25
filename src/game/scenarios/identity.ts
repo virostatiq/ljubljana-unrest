@@ -44,6 +44,7 @@ export class IdentityHost {
 	}
 
 	getPerson( handle ) { return this.personRecord( handle ).sample ?? null; }
+	actorProtected( handle ) { return [ ...this.entities.values() ].some( ( entity ) => entity.actor === handle ); }
 	get( handle ) { return this.snapshot( this.entityRecord( handle ) ); }
 
 	peopleContext( owner = null ) {
@@ -213,6 +214,7 @@ export class IdentityHost {
 				check( [ 'protester', 'police', 'bystander', 'counter' ].includes( faction ), 'person.faction', 'adapter returned an invalid faction' );
 				check( Number.isFinite( agitation ) && agitation >= 0 && agitation <= 1, 'person.agitation', 'must be between 0 and 1' );
 				person.sample = Object.freeze( { handle: person.handle, actor: actor.handle, status: member.status,
+					injurySource: member.injurySource ?? null,
 					leader: member.leader === true, position: point( member.position, 'person.position' ),
 					faction, agitation, identified: member.identified === true } );
 
@@ -310,7 +312,7 @@ export class IdentityHost {
 		if ( entity.rules ) {
 
 			if ( ! entity.rules.friendly.includes( person.sample.actor.id ) ) return Object.freeze( { status: 'rejected', code: 'RECOVERY_BLOCKED' } );
-			if ( Math.hypot( person.sample.position[ 0 ] - entity.position[ 0 ], person.sample.position[ 1 ] - entity.position[ 1 ] ) > entity.rules.radius ) return Object.freeze( { status: 'rejected', code: 'OUT_OF_RANGE' } );
+			if ( Math.hypot( person.sample.position[ 0 ] - entity.position[ 0 ], person.sample.position[ 1 ] - entity.position[ 1 ] ) > ( entity.rules.downRadius ?? entity.rules.radius ) ) return Object.freeze( { status: 'rejected', code: 'OUT_OF_RANGE' } );
 			if ( ! entity.capture?.available ) return Object.freeze( { status: 'rejected', code: 'OBSERVATION_UNAVAILABLE' } );
 			if ( entity.capture.friendly < entity.rules.recoveryMinimum || entity.capture.hostile >= entity.capture.friendly ) return Object.freeze( { status: 'rejected', code: 'RECOVERY_BLOCKED' } );
 

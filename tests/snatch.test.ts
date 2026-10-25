@@ -46,10 +46,11 @@ test( 'a snatch runs the squad at the leader and remembers its post', async () =
 
 } );
 
-test( 'the squad follows a moving leader every readback but takes new flow fields sparingly', () => {
+test( 'the squad follows a moving leader every readback but takes new flow fields sparingly', async () => {
 
 	const { world, A, target, writes, fields } = snatchFixture();
 	world.snatch( [ A ], target, 0 );
+	await settle();
 	target.leaderPos = [ 58, 0 ]; // within SNATCH_FIELD of the field's goal: aim only
 	assert.equal( world.snatchStep( A, 0.5 ), null );
 	assert.deepEqual( [ last( writes, A.id ).ax, last( writes, A.id ).ay ], [ 58, 0 ] );
@@ -61,6 +62,66 @@ test( 'the squad follows a moving leader every readback but takes new flow field
 	world.snatchStep( A, SNATCH_REFIELD );
 	assert.equal( fields.length, 2 );
 	assert.deepEqual( fields[ 1 ].slice( 0, 2 ), [ 80, 0 ] );
+
+} );
+
+test( 'a slow pursuit field does not accumulate requests while the leader moves', async () => {
+
+	const { world, A, target } = snatchFixture();
+	const requests = []; let resolveField;
+	world.fieldTo = ( ...args ) => { requests.push( args ); return new Promise( ( resolve ) => { resolveField = resolve; } ); };
+	world.snatch( [ A ], target, 0 );
+	for ( let update = 1; update <= 5; update ++ ) {
+
+		target.leaderPos = [ 50 + update * 30, 0 ]; world.snatchStep( A, SNATCH_REFIELD * update );
+
+	}
+	assert.equal( requests.length, 1 );
+	resolveField( 1 ); await settle();
+	world.snatchStep( A, SNATCH_REFIELD * 6 );
+	assert.equal( requests.length, 2 );
+	resolveField( 2 ); await settle();
+	assert.equal( ( A as any ).layer, 2 );
+
+} );
+
+test( 'pursuit retries a full-pool request after cooldown even when the leader stops moving', async () => {
+
+	const { world, A, target } = snatchFixture(); let requests = 0;
+	world.fieldTo = () => { requests ++; if ( requests === 1 ) throw new Error( 'flow field pool exhausted' ); return Promise.resolve( 7 ); };
+	world.snatch( [ A ], target, 0 );
+	world.snatchStep( A, SNATCH_REFIELD / 2 ); assert.equal( requests, 1 );
+	world.snatchStep( A, SNATCH_REFIELD ); await settle();
+	assert.equal( requests, 2 ); assert.equal( ( A as any ).layer, 7 );
+
+} );
+
+test( 'cancelling and restarting pursuit cannot build up pending fields or install a stale route', async () => {
+
+	const { world, A, target } = snatchFixture();
+	let resolveField, requests = 0;
+	world.fieldTo = () => { requests ++; return new Promise( ( resolve ) => { resolveField = resolve; } ); };
+	world.snatch( [ A ], target, 0 );
+	for ( let restart = 1; restart <= 5; restart ++ ) {
+
+		world.endSnatch( [ A ] ); target.leaderPos = [ 50 + restart * 30, 0 ]; world.snatch( [ A ], target, restart );
+
+	}
+	assert.equal( requests, 1 );
+	resolveField( 3 ); await settle(); assert.equal( ( A as any ).layer, undefined );
+	world.snatchStep( A, 6 ); assert.equal( requests, 2 );
+	resolveField( 4 ); await settle(); assert.equal( ( A as any ).layer, 4 );
+
+} );
+
+test( 'asynchronous pursuit allocation failures are handled and retried without stale goal caching', async () => {
+
+	const { world, A, target } = snatchFixture(); let requests = 0;
+	world.fieldTo = () => ++ requests === 1 ? Promise.reject( new Error( 'worker failed' ) ) : Promise.resolve( 9 );
+	world.snatch( [ A ], target, 0 ); await settle();
+	assert.equal( ( A as any ).snatchFieldPending, false ); assert.equal( ( A as any ).layer, undefined );
+	world.snatchStep( A, SNATCH_REFIELD ); await settle();
+	assert.equal( requests, 2 ); assert.equal( ( A as any ).layer, 9 );
 
 } );
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ResourceHost, resourceDefinitions } from '../src/game/scenarios/resources.ts';
-import { CommandHost, commandDefinitions, policeCommands } from '../src/game/scenarios/commands.ts';
+import { CommandHost, commandDefinitions, policeCommands, protestCommands, scenarioCommand } from '../src/game/scenarios/commands.ts';
 import { ScenarioEngine } from '../src/game/scenarios/engine.ts';
 import { defineScenario, survive } from '../src/game/scenarios/definition.ts';
 import { ScenarioRuntime } from '../src/game/scenarios/runtime.ts';
@@ -59,6 +59,33 @@ function commandFixture( definitions: readonly any[] = policeCommands( { gas: 'g
 	return { commands, runtime, handle, events, pending, applied, freed };
 
 }
+
+test( 'protest commands accept crowd handles, reject squads and validate umbrella inventory', async () => {
+
+	const definitions = commandDefinitions( protestCommands( { umbrella: 'umbrella' } ), { umbrella: {} } );
+	const fixture = commandFixture( definitions, { umbrella: { capacity: 1 } } );
+	const crowd = Object.freeze( { id: 'crowd', kind: 'crowd', run: 1 } );
+	fixture.runtime.actors.set( crowd.id, { handle: crowd, backend: {} } );
+	assert.equal( ( await fixture.commands.execute( null, 'hold', { at: [ 0, 0 ], selection: [ fixture.handle ] } ).settled as any ).code, 'INVALID_SELECTION' );
+	const hold = fixture.commands.execute( null, 'hold', { at: [ 0, 0 ], selection: [ crowd ] } );
+	await Promise.resolve(); fixture.pending[ 0 ].resolve( {} ); assert.equal( ( await hold.settled as any ).status, 'completed' );
+	assert.ok( fixture.commands.list().every( ( command ) => command.side === 'protest' ) );
+	assert.throws( () => commandDefinitions( protestCommands( { umbrella: 'missing' } ), {} ), /resource/ );
+
+} );
+
+test( 'scenario-owned orders retain validated metadata and spend only on issue receipts', async () => {
+
+	const definitions = commandDefinitions( [ scenarioCommand( { id: 'dispersal-order', key: 'b', label: 'Dispersal order', resource: 'order' } ) ], { order: {} } );
+	assert.deepEqual( commandDefinitions( definitions, { order: {} } ), definitions );
+	const fixture = commandFixture( definitions, { order: { capacity: 1, cooldown: 12 } } );
+	const operation = fixture.commands.execute( null, 'dispersal-order', { at: [ 1, 2 ] } ); await Promise.resolve();
+	assert.equal( fixture.pending[ 0 ].request.custom, true ); assert.equal( fixture.runtime.resources.get( 'order' ).reserved, 1 );
+	fixture.pending[ 0 ].resolve( { custom: true } ); assert.equal( ( await operation.settled as any ).status, 'completed' );
+	assert.equal( fixture.runtime.resources.get( 'order' ).left, 0 ); assert.equal( fixture.commands.list()[ 0 ].key, 'b' );
+	assert.throws( () => scenarioCommand( { id: 'gas', key: 'b', label: 'Override' } ), /non-standard/ );
+
+} );
 
 test( 'command resources spend only after application; duplicate final-unit requests reject', async () => {
 

@@ -75,7 +75,7 @@ test( 'plugin factories receive only definition builders, never the internal mis
 		sdkVersion: 1,
 		default: ( sdk ) => {
 
-			assert.deepEqual( Object.keys( sdk ).sort(), [ 'SDK_VERSION', 'defineBehavior', 'defineOutcome', 'defineScenario', 'escortConvoy', 'extract', 'followRoute', 'holdBuilding', 'holdCrowd', 'landmark', 'place', 'policeCommands', 'preventClash', 'protect', 'survive', 'target' ] );
+			assert.deepEqual( Object.keys( sdk ).sort(), [ 'SDK_VERSION', 'defineBehavior', 'defineOutcome', 'defineScenario', 'escortConvoy', 'extract', 'followRoute', 'holdBuilding', 'holdCrowd', 'landmark', 'place', 'policeCommands', 'preventClash', 'protect', 'protestCommands', 'scenarioCommand', 'survive', 'target' ] );
 			assert.equal( sdk.Mission, undefined );
 			assert.equal( sdk.FACTION, undefined );
 			return scenarioPlugin.default( sdk );

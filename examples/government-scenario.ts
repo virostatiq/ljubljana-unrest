@@ -1,4 +1,5 @@
 import type * as Sdk from '../src/game/scenarios/sdk.d.ts';
+import { defenseDirector, defenseTargets, defenseWarnings, deployDefense } from './defense-common.ts';
 
 export const sdkVersion = 1;
 
@@ -61,6 +62,16 @@ export default ( { defineBehavior, defineOutcome, defineScenario, holdBuilding, 
 		create() {
 
 			const groups = new Map<any, any>(), riotActors = new Set<any>();
+			const direct = defenseDirector( ( actor ) => riotActors.add( actor.id ) );
+			const warn = defenseWarnings( 'government' ), spawnedWaves = new Set<string>();
+			let targets;
+			const refreshMarkers = ( ctx ) => {
+
+				const next = waves.find( ( wave ) => ! spawnedWaves.has( wave.id ) );
+				ctx.presentation.markers( next && next.at - ctx.time < 60 ? [ { id: 'next-wave', at: [ - 545, - 243 ], radius: 40,
+					label: next.label, kind: 'warn', countdownTo: next.at } ] : [] );
+
+			};
 			let previousHurt = new Map<any, any>(), lastForceNotice = - 99, lastHurtNotice = - 99;
 			const issueMove = ( ctx, state, at, radius, next ) => {
 
@@ -94,12 +105,14 @@ export default ( { defineBehavior, defineOutcome, defineScenario, holdBuilding, 
 							`${wave.label}: ~${wave.people.toLocaleString()} people from Erjavčeva in ${formatTime( Math.min( 30, wave.at ) )}`, 'warn', at ) );
 						ctx.timeline.after( wave.at, () => {
 
+							const operations = [];
 							for ( let offset = 0, index = 0; offset < wave.people; offset += 100, index ++ ) {
 
 								const people = Math.min( 100, wave.people - offset ), route = routes[ index % routes.length ];
 								const operation = ctx.spawn.crowd( { id: `${wave.id}-${String( index + 1 ).padStart( 2, '0' )}`,
 									label: wave.label, at, people, groupSize: 100, spread: 35, agitation: wave.agitation,
 									morale: wave.morale ?? 0.55, bikes: wave.bikes ?? 0, goal: route.legs[ 0 ], goalRadius: 12 } );
+								operations.push( operation );
 								operation.settled.then( ( outcome ) => {
 
 									if ( outcome.status === 'completed' && ! ctx.signal.aborted ) groups.set( outcome.value.id, {
@@ -109,15 +122,23 @@ export default ( { defineBehavior, defineOutcome, defineScenario, holdBuilding, 
 								} );
 
 							}
+							void Promise.all( operations.map( ( operation ) => operation.settled ) ).then( ( outcomes ) => {
+
+								if ( ctx.signal.aborted || outcomes.some( ( outcome ) => outcome.status !== 'completed' ) ) return;
+								spawnedWaves.add( wave.id ); refreshMarkers( ctx );
+
+							} ).catch( () => {} );
 							ctx.presentation.notice( `${wave.label} set off from Erjavčeva by ${routes.map( ( route ) => route.name ).join( ' and ' )}`, 'bad', at );
 
 						} );
 
 					}
+					refreshMarkers( ctx );
 
 				},
 				onEvent( ctx, event ) {
 
+					warn( ctx, event );
 					if ( event.type !== 'command.applied' ) return;
 					const reaction = FORCE_REACTIONS[ event.command ];
 					if ( ! reaction || ! event.at ) return;
@@ -179,6 +200,7 @@ export default ( { defineBehavior, defineOutcome, defineScenario, holdBuilding, 
 				},
 				update( ctx ) {
 
+					refreshMarkers( ctx );
 					for ( const state of groups.values() ) {
 
 						if ( state.pending ) continue;
@@ -199,6 +221,7 @@ export default ( { defineBehavior, defineOutcome, defineScenario, holdBuilding, 
 						} else issueMove( ctx, state, state.route.rally, 25, { kind: 'rally', leg: state.leg } );
 
 					}
+					direct( ctx, groups, () => targets ??= defenseTargets( ctx, 'government' ) );
 
 				},
 			};
@@ -220,45 +243,30 @@ export default ( { defineBehavior, defineOutcome, defineScenario, holdBuilding, 
 			defineOutcome( { id: 'facade-breach', evaluate: ( { building } ) => building?.breach >= 1
 				? { win: false, reason: 'Protesters forced their way into the Government building.' } : null } ),
 			defineOutcome( { id: 'evacuation-blocked', evaluate: ( { building } ) => building?.evacuation >= 1
-				? { win: false, reason: 'Every exit was blocked - the evacuation could not proceed.' } : null } ),
+				? { win: false, reason: 'Every exit was blocked — the evacuation could not proceed.' } : null } ),
 		],
 		score: ( { win, metrics } ) => {
 
 			const second = win && metrics.opinion >= 45, third = win && metrics.counters.injuriesByPolice <= 25;
-			return { stars: Number( win ) + Number( second ) + Number( third ), lines: [
+			const lines: [ string, string | number ][] = [
 				[ 'Public opinion', Math.round( metrics.opinion ) ], [ 'Injuries caused by police', metrics.counters.injuriesByPolice ],
 				[ 'Officers injured', metrics.counters.officersInjured ], [ 'Arrests', metrics.counters.arrests ], [ 'Tear gas used', metrics.counters.gasUsed ],
-			] };
+			];
+			let stars = Number( win ) + Number( second ) + Number( third );
+			if ( metrics.escalation >= 4 ) { stars = Math.min( stars, 1 ); lines.push( [ 'Firearms used', 'yes — max ★' ] ); }
+			return { stars, lines };
 
 		},
-		resources: { gas: { capacity: 4 }, water: { capacity: 6 }, reinforce: { capacity: 3, cooldown: 15 } },
-		commands: policeCommands( { gas: 'gas', water: 'water', reinforce: 'reinforce', crew: true } ),
+		resources: { gas: { capacity: 4 }, water: { capacity: 6 }, reinforce: { capacity: 3 } },
+		commands: policeCommands( { gas: 'gas', water: 'water', reinforce: 'reinforce', crew: true, firearms: true } ),
 		locations: { government: target( 'Vlada RS' ), preseren: place( 'Prešernov trg' ),
 			kongresni: place( 'Kongresni trg' ), metelkova: place( 'Metelkova' ), railway: landmark( 'Železniška postaja' ),
 			tivoli: place( 'Park Tivoli' ), mestni: place( 'Mestni trg' ), dragon: place( 'Zmajski most' ), station: landmark( 'PU Ljubljana' ) },
 		setup( ctx ) {
-
-			const building = ctx.spatial.buildingGeometry( 'government' ), outer = building.footprints[ 0 ];
-			ctx.presentation.focus( 'government', 0.55 );
-			ctx.spawn.vehicle( { id: 'water-cannon', label: 'Water cannon', type: 'water-cannon', at: building.exits[ 0 ] } );
-			const patrolSpots = [ ...building.exits.slice( 1 ), ctx.locations.get( 'station' ), ctx.locations.get( 'station' ) ].slice( 0, 2 );
-			for ( const [ index, at ] of patrolSpots.entries() ) ctx.spawn.vehicle( { id: `patrol-${index + 1}`, type: 'police-patrol', at } );
-			const ring = Array.from( { length: 6 }, ( _, index ) => {
-
-				const angle = index / 6 * Math.PI * 2, x = Math.cos( angle ), y = Math.sin( angle );
-				let distance = 0;
-				while ( distance < building.radius * 2 && inRing( outer, building.position[ 0 ] + x * distance, building.position[ 1 ] + y * distance ) ) distance ++;
-				const at: Sdk.Point = [ building.position[ 0 ] + x * ( distance + 14 ), building.position[ 1 ] + y * ( distance + 14 ) ];
-				return ctx.spatial.walkable( at, 30 ) ?? at;
-
-			} );
-			for ( const [ index, at ] of [ ...ring, ...building.exits, ...ring.slice( 0, 3 ) ].entries() ) ctx.spawn.squad( { id: `guard-${index + 1}`, at, people: 30 } );
-			ctx.spawn.bystanders( { id: 'onlookers', people: 2200,
-				destinations: [ 'preseren', 'kongresni', 'metelkova', 'railway', 'tivoli', 'mestni', 'dragon' ] } );
-
+			deployDefense( ctx, 'government' );
 		},
 		behaviors: [ columns( { id: 'route-columns' } ) ],
-		objectives: [ holdBuilding( { id: 'hold', target: 'government', seconds: 720, reason: 'The Government building held.' } ) ],
+		objectives: [ holdBuilding( { id: 'hold', target: 'government', seconds: 720, reason: 'the Government building held. The crowd is going home.' } ) ],
 	} );
 
 };

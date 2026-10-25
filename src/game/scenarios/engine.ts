@@ -3,6 +3,7 @@ import { rand, WATER_JET, World } from '../../sim/world.ts';
 import { Mission } from '../mission.ts';
 import { Convoy } from '../convoy.ts';
 import { check } from './definition.ts';
+import { inPoly } from '../sdk/geometry.ts';
 
 export class ScenarioEngine {
 
@@ -12,6 +13,8 @@ export class ScenarioEngine {
 	declare snatchTasks: Map<any, any>;
 	declare sitters: Set<number>;
 	declare sittingActors: Set<string>;
+	declare wanderGroups: Map<any, readonly number[]>;
+	declare scenarioShelters: Map<number, number>;
 
 	constructor( mission ) {
 
@@ -21,17 +24,99 @@ export class ScenarioEngine {
 		this.snatchTasks = new Map<any, any>();
 		this.sitters = new Set();
 		this.sittingActors = new Set();
+		this.wanderGroups = new Map();
+		this.scenarioShelters = new Map();
 
 	}
 
 	place( name ) { return this.mission.world.places[ name ]; }
 	landmark( name ) { return this.mission.world.marks[ name ]; }
+	sampleWalkable( at, radius, streetOnly, random ) { return this.mission.world.spot( ...at, radius, streetOnly, random ); }
 	walkable( at, radius ) { return this.mission.world.roadSpot( ...at, radius ); }
 	roadSpan( at, maxDistance ) { return this.mission.world.across( ...at, maxDistance ); }
 	clearance( at ) { return this.mission.world.sdf( ...at ); }
+	footprint( at ) { return this.mission.city.buildings.find( ( building ) => inPoly( building.p[ 0 ], at[ 0 ], at[ 1 ] ) )?.p[ 0 ] ?? null; }
+	mapRoute() { return this.mission.city.route ?? []; }
+	carriageways() { return ( this.mission.city.ring ?? [] ).map( ( flat ) => Array.from( { length: flat.length / 2 }, ( _, index ) => [ flat[ index * 2 ], flat[ index * 2 + 1 ] ] ) ); }
+	streetCost( at ) { return this.mission.world.cost( at[ 0 ], at[ 1 ] ); }
+	cctvCoverage( at ) { return this.mission.world.cctv( at[ 0 ], at[ 1 ] ); }
+	visible( from, to ) {
+
+		const distance = Math.hypot( to[ 0 ] - from[ 0 ], to[ 1 ] - from[ 1 ] );
+		for ( let along = 1; along < distance; along += 1 ) if ( this.mission.world.sdf( from[ 0 ] + ( to[ 0 ] - from[ 0 ] ) * along / distance, from[ 1 ] + ( to[ 1 ] - from[ 1 ] ) * along / distance ) <= 0 ) return false;
+		return true;
+
+	}
+	ray( from, angle, range, ignoreBarriers ) {
+
+		const { city, world } = this.mission, raw = ignoreBarriers ? city.scenarioRawSdf : null;
+		for ( let distance = 2; distance < range; distance += 0.5 ) {
+
+			const x = from[ 0 ] + Math.cos( angle ) * distance, y = from[ 1 ] + Math.sin( angle ) * distance;
+			const column = Math.floor( x - city.bounds[ 0 ] ), row = Math.floor( y - city.bounds[ 1 ] );
+			const clearance = raw ? column < 0 || row < 0 || column >= city.sdf.w || row >= city.sdf.h ? - 1 : raw[ row * city.sdf.w + column ] / 10 : world.sdf( x, y );
+			if ( clearance < 0 ) return distance;
+
+		}
+		return range;
+
+	}
+	openBarrier( at, radius ) {
+
+		const { city, crowd } = this.mission; if ( ! city.scenarioRawSdf ) return;
+		for ( let row = Math.max( 0, Math.floor( at[ 1 ] - radius - city.bounds[ 1 ] ) ); row <= Math.min( city.sdf.h - 1, Math.ceil( at[ 1 ] + radius - city.bounds[ 1 ] ) ); row ++ ) for ( let column = Math.max( 0, Math.floor( at[ 0 ] - radius - city.bounds[ 0 ] ) ); column <= Math.min( city.sdf.w - 1, Math.ceil( at[ 0 ] + radius - city.bounds[ 0 ] ) ); column ++ ) {
+
+			if ( Math.hypot( city.bounds[ 0 ] + column + 0.5 - at[ 0 ], city.bounds[ 1 ] + row + 0.5 - at[ 1 ] ) < radius ) city.sdfData[ row * city.sdf.w + column ] = city.scenarioRawSdf[ row * city.sdf.w + column ];
+
+		}
+		crowd.sdfTex.needsUpdate = true;
+
+	}
 	entries() { return ( this.mission.city.entries ?? [] ).map( ( entry ) => ( { name: entry.name, position: entry.pos } ) ); }
 	notice( text, kind, at ) { this.mission.event( text, kind, at ); }
 	coach( card ) { this.mission.game.hud.coach( card ); }
+	adjustOpinion( delta, reason ) { this.mission.nudgeOpinion( delta, reason ); }
+	async configureEnvironment( options ) {
+
+		const { world, crowd, city } = this.mission;
+		if ( options.wind ) world.wind = [ ...options.wind ];
+		if ( options.leadersVisible !== undefined ) crowd.u.revealLeaders.value = Number( options.leadersVisible );
+		for ( const key of [ 'resolveDecay', 'holdRestraint' ] ) if ( options[ key ] !== undefined ) crowd.u[ key ].value = options[ key ];
+		if ( options.southExits ) { world.exitLayer = await world.flow.request( 'scenario-exits-south', city.entries.filter( ( entry ) => entry.pos[ 1 ] < 0 ).map( ( entry ) => ( { x: entry.pos[ 0 ], y: entry.pos[ 1 ], r: 14 } ) ), { pinned: true } ); crowd.u.exitLayer.value = world.exitLayer; }
+
+	}
+	configureActor( groups, options ) {
+
+		for ( const group of groups ) {
+
+			if ( options.speed !== undefined ) this.mission.crowd.setGroup( group.id, { speed: options.speed } );
+			for ( const key of [ 'masked', 'identified' ] ) if ( options[ key ] !== undefined ) group[ key ] = options[ key ];
+			if ( options.parting === true ) this.mission.crowd.u.parting.value = group.id;
+			if ( options.parting === false && this.mission.crowd.u.parting.value === group.id ) this.mission.crowd.u.parting.value = - 1;
+			if ( options.home === true && ! group.home ) Mission.prototype.sendHome.call( this.mission, group );
+			if ( options.home === false ) { group.home = false; for ( const member of group.members ) this.mission.crowd.recall( member, 0.3 ); }
+
+		}
+		return Object.freeze( { status: 'completed' } );
+
+	}
+	recruitActor( groups ) {
+
+		const { crowd, world, runtime } = this.mission;
+		if ( ! world.intel || groups.some( ( group ) => group.faction !== FACTION.BYSTANDER ) ) return { status: 'rejected', code: 'FACTION' };
+		const members = groups.flatMap( ( group ) => group.members.filter( ( member ) => world.intel.faction( member ) === FACTION.BYSTANDER ) );
+		if ( crowd.pendingEdits.length + members.length * 3 + groups.length > MAX_EDITS ) return { status: 'rejected', code: 'EDIT_CAPACITY' };
+		for ( const group of groups ) {
+
+			const live = group.members.filter( ( member ) => world.intel.faction( member ) === FACTION.BYSTANDER ); if ( ! live.length ) continue;
+			Object.assign( group, { faction: FACTION.PROTESTER, kind: 'crowd', mode: MODE.MARCH, leader: live[ 0 ], leaderState: 'active' } ); this.wanderGroups.delete( group );
+			for ( const [ index, member ] of live.entries() ) { crowd.regroup( member, group.id, index ? ROLE.MEMBER : ROLE.LEADER ); crowd.compareFaction( member, FACTION.BYSTANDER, FACTION.PROTESTER, group.id ); crowd.nudge( member, 0.25, 1 ); }
+			crowd.setGroup( group.id, { leader: group.leader, speed: rand( 0.9, 1.15, () => runtime.random() ), mode: MODE.MARCH, morale: 0.9 } );
+
+		}
+		return { status: 'completed', people: members.length };
+
+	}
 
 	createConvoy( options ) {
 
@@ -96,7 +181,8 @@ export class ScenarioEngine {
 			counters: Object.freeze( { injuriesByPolice: counters.injByPolice,
 			otherInjuries: counters.injOther, officersInjured: counters.injPolice, arrests: counters.arrested,
 			sitterArrests: counters.arrestedSitters, peopleGone: counters.gone, gasUsed: counters.gas,
-			shotsFired: counters.shot ?? 0 } ) } );
+			shotsFired: counters.shot ?? 0, treatedByMedics: counters.treated ?? 0,
+			peopleKilled: this.mission.stats?.[ STAT.KILLED ] ?? 0, officersKilled: this.mission.stats?.[ STAT.KILLED_POLICE ] ?? 0 } ) } );
 
 	}
 
@@ -112,11 +198,53 @@ export class ScenarioEngine {
 
 	}
 
+	nudgePerson( backend, agitation, resolve ) {
+
+		const { crowd, world } = this.mission;
+		if ( ! world.intel || ! backend.group.members.includes( backend.member ) || world.intel.group( backend.member ) !== backend.group.id || world.intel.faction( backend.member ) < 0 || world.intel.faction( backend.member ) > 3.5 ) return { status: 'rejected', code: 'PERSON_UNAVAILABLE' };
+		if ( crowd.pendingEdits.length >= MAX_EDITS ) return { status: 'rejected', code: 'EDIT_CAPACITY' };
+		crowd.nudge( backend.member, agitation, resolve ); return { status: 'queued' };
+
+	}
+
+	applyPersonEffect( backend, status, source ) {
+
+		const { member, group } = backend, { crowd, world } = this.mission;
+		const faction = world.intel?.faction( member );
+		if ( ! world.intel || ! group.members.includes( member ) || world.intel.group( member ) !== group.id || ! Number.isFinite( faction ) || faction < 0 || faction >= 30 ) return { status: 'rejected', code: 'PERSON_UNAVAILABLE' };
+		if ( crowd.pendingEdits.length >= MAX_EDITS ) return { status: 'rejected', code: 'EDIT_CAPACITY' };
+		const base = faction % 10;
+		const next = status === 'removed' ? - 1 : status === 'detained' ? this.sitters.has( member ) ? FACTION.ARRESTED_SITTER : FACTION.ARRESTED : status === 'dead' ? 30 + base : ( source === 'police' ? 10 : 20 ) + base;
+		crowd.compareFaction( member, faction, next, group.id );
+		return { status: 'queued' };
+
+	}
+
 	setCrowdMode( groups, mode ) {
 
 		if ( groups.some( ( group ) => ! [ FACTION.PROTESTER, FACTION.BYSTANDER, FACTION.COUNTER ].includes( group.faction ) ) ) return { status: 'rejected', code: 'FACTION' };
-		this.mission.world.setMode( groups, { hold: MODE.HOLD, march: MODE.MARCH, riot: MODE.RIOT, sit: MODE.SIT, shield: MODE.SHIELD, push: MODE.PUSH }[ mode ] );
+		this.mission.world.setMode( groups, { hold: MODE.HOLD, march: MODE.MARCH, riot: MODE.RIOT, sit: MODE.SIT, shield: MODE.SHIELD, push: MODE.PUSH, storm: MODE.STORM, panic: MODE.PANIC, disperse: MODE.DISPERSE }[ mode ] );
 		return { status: 'completed' };
+
+	}
+
+	splitActor( groups ) {
+
+		const world = this.mission.world, source = groups.filter( ( group ) => group.members.length );
+		const total = source.reduce( ( count, group ) => count + group.members.length, 0 );
+		if ( total < 8 || world.groups.length + source.length > world.crowd.G ) return { groups: source, newGroups: [] };
+		const created = source.map( ( group ) => world.split( group ) ).filter( Boolean );
+		return { groups: source, newGroups: created };
+
+	}
+
+	mergeActors( collections ) {
+
+		const world = this.mission.world, groups = collections.flatMap( ( collection ) => collection.filter( ( group ) => group.members.length ) );
+		if ( groups.length < 2 ) return { status: 'rejected', code: 'TOO_SMALL' };
+		if ( ! groups.every( ( group ) => group.faction === groups[ 0 ].faction ) ) return { status: 'rejected', code: 'FACTION' };
+		const merged = world.merge( groups ); if ( ! merged ) return { status: 'rejected', code: 'TOO_SMALL' };
+		return { status: 'completed', groups: [ merged ], destination: collections.findIndex( ( collection ) => collection.includes( merged ) ) };
 
 	}
 
@@ -184,9 +312,10 @@ export class ScenarioEngine {
 		const before = world.groups.length;
 		try {
 
-			const layer = await world.fieldTo( ...( options.goal ?? options.at ), options.goal ? options.goalRadius : 30 );
+			const layer = kind === 'crowd' && options.speed?.[ 1 ] === 0 && options.goal === null
+				? await world.exits() : await world.fieldTo( ...( options.goal ?? options.at ), options.goal ? options.goalRadius : 30 );
 			signal.throwIfAborted();
-			const mode = { hold: MODE.HOLD, march: MODE.MARCH, riot: MODE.RIOT, sit: MODE.SIT }[ options.mode ];
+			const mode = { hold: MODE.HOLD, march: MODE.MARCH, riot: MODE.RIOT, sit: MODE.SIT, shield: MODE.SHIELD, push: MODE.PUSH, storm: MODE.STORM, panic: MODE.PANIC, disperse: MODE.DISPERSE }[ options.mode ];
 			const faction = { protester: FACTION.PROTESTER, bystander: FACTION.BYSTANDER, counter: FACTION.COUNTER }[ options.faction ];
 			const groups = kind === 'squad'
 				? [ await world.squad( { label: options.id, at: options.at, n: options.people, random } ) ]
@@ -194,10 +323,10 @@ export class ScenarioEngine {
 					? await world.placeBloc( { kind: 'crowd', label: options.label ?? options.id, points: options.points.map( ( at ) => [ ...at ] ),
 						groupSize: options.groupSize, layer, mode, agitation: options.agitation, resolve: options.resolve, morale: options.morale,
 						sitters: options.mode === 'sit', faction } )
-					: await world.bloc( { kind: 'crowd', label: options.label ?? options.id, at: options.at, n: options.people,
+					: await world.bloc( { kind: options.medic ? 'medics' : 'crowd', label: options.label ?? options.id, at: options.at, n: options.people,
 						groupSize: options.groupSize, spread: options.spread, layer, goal: options.goal, goalR: options.goalRadius,
 						mode, agitation: options.agitation, resolve: options.resolve,
-						morale: options.morale, bikes: options.bikes, random, faction } );
+						morale: options.morale, bikes: options.bikes, random, faction, speed: options.speed } );
 			signal.throwIfAborted();
 			const S = options.standoff;
 			if ( S ) for ( const group of groups ) {
@@ -245,6 +374,7 @@ export class ScenarioEngine {
 					n: size, groupSize: size, spread: options.spread, layer, speed: [ 0.7, 1.1 ], random } ) );
 
 			}
+			for ( const group of groups ) this.wanderGroups.set( group, layers );
 			return groups;
 
 		} catch ( error ) {
@@ -253,6 +383,50 @@ export class ScenarioEngine {
 			throw error;
 
 		}
+
+	}
+
+	updateAmbient( dt ) {
+
+		for ( const group of this.mission.world.groups ?? [] ) {
+
+			if ( group.faction === FACTION.POLICE || ( group.leaderState !== 'arrested' && ! group.leaderDetained ) || group.leaderReported ) continue;
+			group.leaderReported = true;
+			this.mission.crowd.setGroup( group.id, { morale: 0.15 } );
+			this.mission.onLeaderArrested?.( group );
+
+		}
+		if ( ! this.wanderGroups.size ) return;
+		const random = () => this.mission.runtime.random();
+		if ( random() >= dt * 0.5 ) return;
+		const groups = [ ...this.wanderGroups.keys() ].filter( ( group ) => group.faction === FACTION.BYSTANDER && group.members.length );
+		if ( ! groups.length ) return;
+		const group = groups[ Math.floor( random() * groups.length ) ], layers = this.wanderGroups.get( group );
+		this.mission.world.setLayer( group, layers[ Math.floor( random() * layers.length ) ] );
+
+	}
+
+	setShelter( groups, until ) {
+
+		for ( const group of groups ) this.scenarioShelters.set( group.id, until );
+		this.mission.crowd.setShelter( [ ...this.scenarioShelters.keys() ] );
+		return { status: 'completed' };
+
+	}
+
+	updateShelters() {
+
+		let changed = false;
+		for ( const [ id, until ] of this.scenarioShelters ) if ( this.mission.runtime.time >= until ) { this.scenarioShelters.delete( id ); changed = true; }
+		if ( changed ) this.mission.crowd.setShelter( [ ...this.scenarioShelters.keys() ] );
+
+	}
+
+	observePolicies( sample ) {
+
+		if ( this.mission._medIntel === sample ) return;
+		this.mission._medIntel = sample;
+		Mission.prototype.treat.call( this.mission, sample );
 
 	}
 
@@ -304,6 +478,7 @@ export class ScenarioEngine {
 			const status = faction === FACTION.ARRESTED || faction === FACTION.ARRESTED_SITTER ? 'detained'
 				: faction < 0 ? 'gone' : faction > 29.5 ? 'dead' : faction > 9.5 ? 'injured' : 'active';
 			people.push( { key: member, backend: Object.freeze( { member, group } ), leader: group.leader === member,
+				injurySource: faction > 9.5 && faction < 19.5 ? 'police' : faction > 19.5 && faction < 29.5 ? 'other' : null,
 				status, position: [ positionX, positionY ], faction: [ 'protester', 'police', 'bystander', 'counter' ][ faction >= 0 ? Math.floor( faction ) % 10 : group.faction ],
 				identified: group.identified === true, agitation: typeof sample.agitation === 'function' ? sample.agitation( member ) : 0,
 				membershipMatches: typeof sample.group !== 'function' || sample.group( member ) === group.id } );
@@ -467,6 +642,7 @@ export class ScenarioEngine {
 		}
 		for ( const group of groups ) {
 
+			this.wanderGroups.delete( group );
 			for ( const member of group.members ) crowd.setFaction( member, - 1 );
 			group.members = [];
 			group.alive = 0;
@@ -602,6 +778,8 @@ export class ScenarioEngine {
 
 		const { world, crowd, runtime } = this.mission;
 		signal.throwIfAborted();
+		if ( request.custom ) return { custom: true, groups: selected.flat(), applied: false };
+		if ( [ 'hold', 'sit', 'shield', 'scatter', 'disperse', 'fire-up', 'calm', 'umbrella', 'split', 'merge' ].includes( request.id ) ) return { groups: selected.flat(), protest: true, applied: false };
 		if ( request.id === 'gas' || request.id === 'shield-push' ) return {};
 		let actor = null, groups = selected.flat();
 		if ( request.id === 'firearms' ) return { groups, applied: false };
@@ -678,13 +856,39 @@ export class ScenarioEngine {
 
 		const { world, runtime, game } = this.mission;
 		if ( ! current() ) return { status: 'rejected', code: 'SUPERSEDED' };
+		if ( prepared.custom ) {
+
+			let affected = request.selection;
+			if ( request.id === 'split' ) { const result = runtime.splitActor( request.selection[ 0 ], request.operation ); if ( result.status !== 'completed' ) return result; affected = [ ...affected, result.value ]; }
+			if ( request.id === 'merge' ) { const result = runtime.mergeActors( request.selection, request.operation ); if ( result.status !== 'completed' ) return result; affected = [ result.value ]; }
+			prepared.applied = true;
+			return { status: 'completed', value: { affected: Object.freeze( [ ...affected ] ) } };
+
+		}
 		const groups = prepared.groups ?? selected.flat();
 		let affected = groups;
 		if ( request.id !== 'snatch' && [ 'charge', 'arrest', 'kettle', 'shield-push' ].includes( request.id ) ) this.cancelSnatches( groups, `squad received ${request.id}` );
-		if ( ! [ 'gas', 'reinforce', 'water', 'crew' ].includes( request.id ) && groups.some( ( group ) => ! group.members.some( ( member ) => world.intel?.faction( member ) === FACTION.POLICE ) ) ) return { status: 'rejected', code: 'INVALID_SELECTION' };
+		if ( ! [ 'gas', 'reinforce', 'water', 'crew' ].includes( request.id ) && groups.some( ( group ) => ! group.members.some( ( member ) => world.intel?.faction( member ) === ( prepared.protest ? FACTION.PROTESTER : FACTION.POLICE ) ) ) ) return { status: 'rejected', code: 'INVALID_SELECTION' };
 		let work;
 		let crewHandle = null;
-		if ( request.id === 'gas' ) { world.gas( ...request.at ); affected = []; }
+		if ( prepared.protest ) {
+
+			Mission.prototype.recall.call( this.mission, groups );
+			if ( request.id === 'hold' ) world.setMode( groups, MODE.HOLD );
+			else if ( request.id === 'disperse' ) world.setMode( groups, MODE.DISPERSE );
+			else if ( request.id === 'sit' ) Mission.prototype.sitDown.call( this.mission, groups );
+			else if ( request.id === 'shield' ) Mission.prototype.shieldWall.call( this.mission, groups );
+			else if ( request.id === 'scatter' ) Mission.prototype.beWater.call( this.mission, groups, ...request.at );
+			else if ( request.id === 'fire-up' ) Mission.prototype.fireUp.call( this.mission, groups );
+			else if ( request.id === 'calm' ) Mission.prototype.calmDown.call( this.mission, groups );
+			else if ( request.id === 'umbrella' ) {
+
+				affected = groups.slice( 0, 8 );
+				this.setShelter( affected, this.mission.runtime.time + 30 );
+
+			}
+
+		} else if ( request.id === 'gas' ) { world.gas( ...request.at ); affected = []; }
 		else if ( request.id === 'crew' ) {
 
 			const vehicle = runtime.transport.record( request.selection[ 0 ] ), toggled = runtime.transport.toggleCrew( null,

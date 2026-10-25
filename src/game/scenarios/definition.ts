@@ -1,5 +1,6 @@
 import { resourceDefinitions } from './resources.ts';
 import { commandDefinitions } from './commands.ts';
+import { terrainDefinitions } from './terrain.ts';
 
 export const SDK_VERSION = 1;
 
@@ -75,7 +76,7 @@ export function defineOutcome( rule ) {
 
 }
 
-const METRIC_COUNTERS = [ 'injuriesByPolice', 'otherInjuries', 'officersInjured', 'arrests', 'sitterArrests', 'peopleGone', 'gasUsed', 'shotsFired' ];
+const METRIC_COUNTERS = [ 'injuriesByPolice', 'otherInjuries', 'officersInjured', 'arrests', 'sitterArrests', 'peopleGone', 'gasUsed', 'shotsFired', 'treatedByMedics', 'peopleKilled', 'officersKilled' ];
 
 function metricIndicators( values ) {
 
@@ -237,7 +238,7 @@ function opinionPolicy( value = {} ) {
 
 export function defineScenario( options ) {
 
-	fields( options, [ 'id', 'title', 'subtitle', 'brief', 'side', 'city', 'map', 'goals', 'tips', 'locations', 'setup', 'objectives', 'behaviors', 'resources', 'commands', 'initiallyLockedCommands', 'score', 'menu', 'seed', 'outcomes', 'indicators', 'phase', 'opinion', 'hud' ], 'scenario' );
+	fields( options, [ 'id', 'title', 'subtitle', 'brief', 'side', 'city', 'map', 'goals', 'tips', 'locations', 'setup', 'objectives', 'behaviors', 'resources', 'commands', 'initiallyLockedCommands', 'score', 'menu', 'seed', 'outcomes', 'indicators', 'phase', 'opinion', 'hud', 'terrain' ], 'scenario' );
 	check( typeof options.id === 'string' && ID.test( options.id ), 'scenario.id', 'must be a lowercase slug' );
 	for ( const key of [ 'title', 'subtitle', 'brief' ] ) check( text( options[ key ] ), `scenario.${key}`, 'must be a non-empty string' );
 	check( options.side === undefined || [ 'police', 'protest' ].includes( options.side ), 'scenario.side', 'must be police or protest' );
@@ -285,7 +286,7 @@ export function defineScenario( options ) {
 		subtitle: options.subtitle, brief: options.brief, side: options.side ?? 'police', city: options.city ?? null, map: options.map ?? null,
 		goals: Object.freeze( [ ...( options.goals ?? [] ) ] ), tips: Object.freeze( [ ...( options.tips ?? [] ) ] ), menu: options.menu ?? true,
 		locations: Object.freeze( locations ), setup: options.setup, score: options.score ?? null, seed: options.seed ?? null,
-		behaviors: Object.freeze( behaviors ), outcomes: Object.freeze( outcomes ), indicators, phase: options.phase ?? null, hud: options.hud ?? null, opinion: opinionPolicy( options.opinion ),
+		behaviors: Object.freeze( behaviors ), outcomes: Object.freeze( outcomes ), indicators, phase: options.phase ?? null, hud: options.hud ?? null, opinion: opinionPolicy( options.opinion ), terrain: terrainDefinitions( options.terrain ),
 		initiallyLockedCommands: Object.freeze( [ ...initiallyLockedCommands ] ), resources, commands,
 		objectives: Object.freeze( [ kind === 'hold-building' ? holdBuilding( objective ) : kind === 'hold-crowd' ? holdCrowd( objective ) : kind === 'escort-convoy' ? escortConvoy( objective ) : kind === 'prevent-clash' ? preventClash( objective )
 			: kind === 'extract' ? extract( objective ) : kind === 'protect' ? protect( objective ) : survive( objective ) ] ) } );

@@ -2,8 +2,9 @@ import { check, fields } from './definition.ts';
 
 export function protectionRules( options ) {
 
-	fields( options, [ 'friendly', 'hostile', 'radius', 'seconds', 'downSeconds', 'minimum', 'downMinimum', 'advantage', 'recoveryMinimum' ], 'protection' );
+	fields( options, [ 'friendly', 'hostile', 'radius', 'downRadius', 'seconds', 'downSeconds', 'minimum', 'downMinimum', 'advantage', 'recoveryMinimum' ], 'protection' );
 	const rules: Record<string, any> = { radius: 8, seconds: 4, downSeconds: 8, minimum: 2, downMinimum: 4, advantage: 2, recoveryMinimum: 4, ...options };
+	rules.downRadius ??= rules.radius;
 	for ( const key of [ 'friendly', 'hostile' ] ) {
 
 		check( Array.isArray( rules[ key ] ) && rules[ key ].length > 0 && Array.from( rules[ key ] ).every( ( id ) => typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test( id ) ), `protection.${key}`, 'must be a non-empty dense array of actor IDs' );
@@ -12,7 +13,7 @@ export function protectionRules( options ) {
 
 	}
 	check( ! rules.friendly.some( ( id ) => rules.hostile.includes( id ) ), 'protection', 'friendly and hostile actors must not overlap' );
-	for ( const key of [ 'radius', 'seconds', 'downSeconds', 'advantage' ] ) check( Number.isFinite( rules[ key ] ) && rules[ key ] > 0 && rules[ key ] <= 1000, `protection.${key}`, 'must be positive, finite and at most 1000' );
+	for ( const key of [ 'radius', 'downRadius', 'seconds', 'downSeconds', 'advantage' ] ) check( Number.isFinite( rules[ key ] ) && rules[ key ] > 0 && rules[ key ] <= 1000, `protection.${key}`, 'must be positive, finite and at most 1000' );
 	for ( const key of [ 'minimum', 'downMinimum', 'recoveryMinimum' ] ) check( Number.isInteger( rules[ key ] ) && rules[ key ] > 0, `protection.${key}`, 'must be a positive integer' );
 	return Object.freeze( rules );
 
@@ -32,7 +33,7 @@ export function captureState( entity, rules, people, available, elapsed ) {
 	for ( const person of people ) {
 
 		if ( person.status !== 'active' || person.handle === entity.subject || person.handle === entity.carrier ) continue;
-		if ( Math.hypot( person.position[ 0 ] - entity.position[ 0 ], person.position[ 1 ] - entity.position[ 1 ] ) > rules.radius ) continue;
+		if ( Math.hypot( person.position[ 0 ] - entity.position[ 0 ], person.position[ 1 ] - entity.position[ 1 ] ) > ( down ? rules.downRadius : rules.radius ) ) continue;
 		if ( rules.friendly.includes( person.actor.id ) ) friendly ++;
 		if ( rules.hostile.includes( person.actor.id ) ) hostile ++;
 

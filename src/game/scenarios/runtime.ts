@@ -10,6 +10,7 @@ import { CommandHost } from './commands.ts';
 import { advanceClash } from './clash.ts';
 import { ConvoyHost } from './convoys.ts';
 import { CustodyHost } from './custody.ts';
+import { EffectHost } from './effects.ts';
 
 let nextRun = 1;
 const terminal = new Set( [ 'finished', 'failed', 'disposed' ] );
@@ -49,6 +50,7 @@ export class ScenarioRuntime {
 	declare actors: Map<any, any>;
 	declare operations: Set<any>;
 	declare nextOperation: number;
+	declare nextActor: number;
 	declare observation: any;
 	declare lastSample: any;
 	declare setupFailure: any;
@@ -63,11 +65,13 @@ export class ScenarioRuntime {
 	declare commands: CommandHost;
 	declare convoys: ConvoyHost;
 	declare custody: CustodyHost;
+	declare effects: EffectHost;
 	declare events: any[];
 	declare dispatching: boolean;
 	declare nextEvent: number;
 	declare context: any;
 	declare coachOwner: any;
+	declare markerOwners: Map<any, readonly any[]>;
 
 	constructor( definition, adapter, { onFinish = () => {}, onFailure = () => {}, timeout = 15000 }: { onFinish?: ( result: any ) => void, onFailure?: ( error: any ) => void, timeout?: number } = {} ) {
 
@@ -91,6 +95,7 @@ export class ScenarioRuntime {
 		this.actors = new Map<any, any>();
 		this.operations = new Set<any>();
 		this.nextOperation = 1;
+		this.nextActor = 1;
 		this.observation = null;
 		this.lastSample = null;
 		this.setupFailure = null;
@@ -105,11 +110,36 @@ export class ScenarioRuntime {
 		this.commands = new CommandHost( this );
 		this.convoys = new ConvoyHost( this );
 		this.custody = new CustodyHost( this );
+		this.effects = new EffectHost( this );
 		this.events = [];
 		this.dispatching = false;
 		this.nextEvent = 1;
+		this.markerOwners = new Map();
 		const runtime = this;
 		this.context = Object.freeze( {
+			opinion: Object.freeze( { adjust: ( delta, reason ) => {
+
+				this.writable(); check( Number.isFinite( delta ) && Math.abs( delta ) <= 100, 'opinion.delta', 'must be finite and within 100 points' );
+				check( typeof reason === 'string' && reason.trim() !== '' && reason.length <= 100, 'opinion.reason', 'must be non-empty text up to 100 characters' ); this.adapter.adjustOpinion( delta, reason );
+
+			} } ),
+			environment: Object.freeze( { configure: ( options ) => {
+
+				check( this.state === 'setting-up', 'environment.configure', 'only available during scenario setup' );
+				fields( options, [ 'wind', 'leadersVisible', 'resolveDecay', 'holdRestraint', 'southExits' ], 'environment' );
+				const configured = { ...options };
+				if ( options.wind !== undefined ) { configured.wind = point( options.wind, 'environment.wind' ); check( Math.hypot( ...configured.wind ) <= 4, 'environment.wind', 'speed must be at most four' ); }
+				for ( const key of [ 'leadersVisible', 'southExits' ] ) check( options[ key ] === undefined || typeof options[ key ] === 'boolean', `environment.${key}`, 'must be boolean' );
+				for ( const key of [ 'resolveDecay', 'holdRestraint' ] ) check( options[ key ] === undefined || Number.isFinite( options[ key ] ) && options[ key ] >= 0 && options[ key ] <= 1, `environment.${key}`, 'must be from zero to one' );
+				return this.adapter.configureEnvironment( Object.freeze( configured ) );
+
+			}, openBarrier: ( id, options ) => {
+
+				this.writable(); check( this.definition.terrain.some( ( barrier ) => barrier.id === id ), 'terrain.openBarrier.id', 'unknown barrier' );
+				fields( options, [ 'at', 'radius' ], 'terrain.openBarrier' ); check( Number.isFinite( options.radius ) && options.radius > 0 && options.radius <= 20, 'terrain.openBarrier.radius', 'must be positive and at most twenty' );
+				this.adapter.openBarrier( this.location( options.at ), options.radius );
+
+			} } ),
 			resources: Object.freeze( { get: ( id ) => this.resources.get( id ),
 				list: () => Object.freeze( [ ...this.resources.records.keys() ].map( ( id ) => this.resources.get( id ) ) ) } ),
 			crowd: Object.freeze( {
@@ -120,14 +150,40 @@ export class ScenarioRuntime {
 			commands: this.commands.context(),
 			convoys: this.convoys.context(),
 			custody: this.custody.context(),
+			effects: this.effects.context(),
 			people: this.identity.peopleContext(),
 			protected: this.identity.context(),
 			vehicles: this.transport.context(),
 			targets: Object.freeze( { get: ( alias ) => this.spatial.target( alias ) } ),
 			spatial: Object.freeze( {
+				ray: ( from, angle, range = 220, ignoreBarriers = false ) => {
+
+					check( Number.isFinite( angle ) && Number.isFinite( range ) && range > 0 && range <= 1000 && typeof ignoreBarriers === 'boolean', 'spatial.ray', 'invalid angle, range or obstacle flag' );
+					return this.adapter.ray( this.location( from ), angle, range, ignoreBarriers );
+
+				},
+				route: () => Object.freeze( this.adapter.mapRoute().map( ( at ) => point( at, 'spatial.route' ) ) ),
+				carriageways: () => Object.freeze( this.adapter.carriageways().map( ( path ) => Object.freeze( path.map( ( at ) => point( at, 'spatial.carriageways' ) ) ) ) ),
+				cost: ( at ) => { const value = this.adapter.streetCost( this.location( at ) ); check( Number.isFinite( value ) && value >= 0 && value <= 255, 'spatial.cost', 'invalid host cost' ); return value; },
+				cctv: ( at ) => { const value = this.adapter.cctvCoverage( this.location( at ) ); check( Number.isFinite( value ) && value >= 0 && value <= 255, 'spatial.cctv', 'invalid host coverage' ); return value; },
+				visible: ( from, to ) => {
+
+					const start = this.location( from ), end = this.location( to );
+					check( Math.hypot( end[ 0 ] - start[ 0 ], end[ 1 ] - start[ 1 ] ) <= 1000, 'spatial.visible', 'range exceeds 1000 meters' );
+					return this.adapter.visible( start, end ) === true;
+
+				},
 				count: ( options ) => this.spatial.count( options ),
 				buildingGeometry: ( alias, exitAt ) => this.spatial.buildingGeometry( alias, exitAt ),
 				building: ( alias, exitAt ) => this.spatial.measureBuilding( alias, exitAt ),
+				sample: ( at, options ) => {
+
+					fields( options, [ 'radius', 'streetOnly' ], 'spatial.sample' );
+					check( Number.isFinite( options.radius ) && options.radius > 0 && options.radius <= 1000, 'spatial.sample.radius', 'must be positive and at most 1000 meters' );
+					check( options.streetOnly === undefined || typeof options.streetOnly === 'boolean', 'spatial.sample.streetOnly', 'must be boolean' );
+					return point( this.adapter.sampleWalkable( this.location( at ), options.radius, options.streetOnly ?? true, () => this.random() ), 'spatial.sample' );
+
+				},
 				walkable: ( at, radius = 60 ) => {
 
 					check( Number.isFinite( radius ) && radius > 0 && radius <= 1000, 'spatial.walkable.radius', 'must be positive and at most 1000 meters' );
@@ -142,6 +198,14 @@ export class ScenarioRuntime {
 					return Number.isFinite( value ) ? value : null;
 
 				},
+				footprint: ( at ) => {
+
+					const ring = this.adapter.footprint( this.location( at ) );
+					if ( ring === null ) return null;
+					check( Array.isArray( ring ) && ring.length >= 6 && ring.length % 2 === 0 && Array.from( ring ).every( Number.isFinite ), 'spatial.footprint', 'host returned an invalid outer ring' );
+					return Object.freeze( [ ...ring ] );
+
+				},
 				entries: () => Object.freeze( this.adapter.entries().map( ( entry, index ) => Object.freeze( {
 					name: typeof entry.name === 'string' ? entry.name : null, position: point( entry.position, `spatial.entries.${index}` ) } ) ) ),
 			} ),
@@ -152,13 +216,16 @@ export class ScenarioRuntime {
 				vehicle: ( options ) => this.spawn( 'vehicle', options ),
 			} ),
 			locations: Object.freeze( { get: ( id ) => this.location( id ) } ),
-			actors: Object.freeze( { get: ( handle ) => this.actor( handle ), resolve: ( id ) => {
+			actors: Object.freeze( { split: ( actor ) => this.splitActor( actor ), merge: ( actors ) => this.mergeActors( actors ), configure: ( actor, options ) => this.configureActor( actor, options ),
+				recruit: ( actor ) => this.recruitActor( actor ),
+				get: ( handle ) => this.actor( handle ), resolve: ( id ) => {
 
 				check( this.actors.has( id ), 'actors.resolve', `unknown actor '${id}'` );
 				return this.actors.get( id ).handle;
 
 			} } ),
 			presentation: Object.freeze( {
+				markers: ( markers ) => this.setMarkers( null, markers ),
 				notice: ( text, kind = 'info', at = null ) => {
 
 					this.writable();
@@ -180,6 +247,96 @@ export class ScenarioRuntime {
 			get metrics() { return runtime.metrics(); },
 			get observation() { return runtime.observation; },
 		} );
+
+	}
+
+	configureActor( value, options ) {
+
+		this.writable(); fields( options, [ 'speed', 'masked', 'identified', 'parting', 'home' ], 'actors.configure' );
+		for ( const key of [ 'masked', 'identified', 'parting', 'home' ] ) check( options[ key ] === undefined || typeof options[ key ] === 'boolean', `actors.${key}`, 'must be boolean' );
+		check( options.speed === undefined || Number.isFinite( options.speed ) && options.speed >= 0 && options.speed <= 4, 'actors.speed', 'must be from zero to four' );
+		const handle = typeof value === 'string' ? this.context.actors.resolve( value ) : value; this.actor( handle );
+		check( handle.kind !== 'vehicle', 'actors.configure', 'requires a population actor' );
+		return this.adapter.configureActor( this.actors.get( handle.id ).backend, Object.freeze( { ...options } ) );
+
+	}
+
+	splitActor( value, operationId = null ) {
+
+		this.writable(); const handle = typeof value === 'string' ? this.context.actors.resolve( value ) : value; this.actor( handle ); const record = this.actors.get( handle.id );
+		check( handle.kind === 'crowd' && Array.isArray( record.backend ), 'actors.split', 'requires a crowd actor' );
+		if ( this.identity.actorProtected( handle ) ) return Object.freeze( { status: 'rejected', code: 'PROTECTED_ACTOR' } );
+		if ( ( this.commands.claims.get( handle ) && this.commands.claims.get( handle ).id !== operationId ) || this.transport.locked( handle ) ) return Object.freeze( { status: 'rejected', code: 'CONTROL_BUSY' } );
+		const id = `${handle.id}-split-${this.nextActor}`; check( id.length <= 40, 'actors.split', 'actor ID capacity exceeded' );
+		const result = this.adapter.splitActor( record.backend );
+		if ( ! result.newGroups.length ) return Object.freeze( { status: 'rejected', code: 'TOO_SMALL' } );
+		record.backend = result.groups;
+		this.nextActor ++;
+		const child = Object.freeze( { id, kind: 'crowd', run: this.run } );
+		this.actors.set( id, { handle: child, backend: result.newGroups, owner: record.owner, capacity: null, type: null, crewHandle: null, requestedPeople: 0, requestedGroups: result.newGroups.length } );
+		return Object.freeze( { status: 'completed', value: child } );
+
+	}
+
+	mergeActors( values, operationId = null ) {
+
+		this.writable(); check( Array.isArray( values ) && values.length >= 2, 'actors.merge', 'requires at least two crowd actors' );
+		const handles = values.map( ( value ) => typeof value === 'string' ? this.context.actors.resolve( value ) : value );
+		check( new Set( handles ).size === handles.length, 'actors.merge', 'actor handles must be unique' );
+		const records = handles.map( ( handle ) => { this.actor( handle ); return this.actors.get( handle.id ); } );
+		check( records.every( ( record ) => record.handle.kind === 'crowd' && Array.isArray( record.backend ) ), 'actors.merge', 'requires crowd actors' );
+		if ( records.some( ( record ) => this.identity.actorProtected( record.handle ) ) ) return Object.freeze( { status: 'rejected', code: 'PROTECTED_ACTOR' } );
+		if ( records.some( ( record ) => this.commands.claims.get( record.handle ) && this.commands.claims.get( record.handle ).id !== operationId || this.transport.locked( record.handle ) ) ) return Object.freeze( { status: 'rejected', code: 'CONTROL_BUSY' } );
+		const result = this.adapter.mergeActors( records.map( ( record ) => record.backend ) );
+		if ( result.status === 'rejected' ) return Object.freeze( result );
+		const target = records[ result.destination ], discarded = records.filter( ( _, index ) => index !== result.destination );
+		target.backend = result.groups;
+		for ( const record of discarded ) { const order = this.movement.orders.get( record.handle.id ); if ( order ) this.movement.remove( order, 'actor merged' ); record.backend = []; }
+		return Object.freeze( { status: 'completed', value: target.handle } );
+
+	}
+	recruitActor( value ) {
+
+		this.writable(); const handle = typeof value === 'string' ? this.context.actors.resolve( value ) : value; this.actor( handle );
+		check( handle.kind === 'crowd', 'actors.recruit', 'requires a crowd actor' );
+		return this.adapter.recruitActor( this.actors.get( handle.id ).backend );
+
+	}
+
+	setMarkers( owner, markers ) {
+
+		this.writable();
+		check( Array.isArray( markers ) && markers.length <= 64, 'presentation.markers', 'must be a dense array of at most 64 markers' );
+		const ids = new Set();
+		const detached = Array.from( markers, ( marker, index ) => {
+
+			const path = `presentation.markers.${index}`;
+			fields( marker, [ 'id', 'at', 'radius', 'label', 'kind', 'countdownTo', 'shape', 'points' ], path );
+			check( typeof marker.id === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test( marker.id ) && ! ids.has( marker.id ), `${path}.id`, 'must be a unique lowercase slug within its owner' );
+			ids.add( marker.id );
+			check( Number.isFinite( marker.radius ) && marker.radius > 0 && marker.radius <= 1000, `${path}.radius`, 'must be positive and at most 1000 meters' );
+			check( typeof marker.label === 'string' && marker.label.trim() !== '' && marker.label.length <= 160 && ! /[\r\n\t]/.test( marker.label ), `${path}.label`, 'must be single-line text up to 160 characters' );
+			check( marker.kind === undefined || [ 'info', 'good', 'warn', 'bad' ].includes( marker.kind ), `${path}.kind`, 'invalid notice kind' );
+			check( marker.countdownTo === undefined || Number.isFinite( marker.countdownTo ) && marker.countdownTo >= 0, `${path}.countdownTo`, 'must be a non-negative game time' );
+			check( marker.shape === undefined || [ 'polygon', 'path' ].includes( marker.shape ), `${path}.shape`, 'must be polygon or path' );
+			check( marker.shape === undefined ? marker.points === undefined : Array.isArray( marker.points ) && marker.points.length >= ( marker.shape === 'polygon' ? 3 : 2 ) && marker.points.length <= 512, `${path}.points`, 'invalid annotation point count' );
+			return Object.freeze( { id: marker.id, at: this.location( marker.at ), radius: marker.radius, label: marker.label,
+				kind: marker.kind ?? 'info', countdownTo: marker.countdownTo, shape: marker.shape,
+				points: marker.points ? Object.freeze( Array.from( marker.points, ( at ) => point( at, `${path}.points` ) ) ) : undefined } );
+
+		} );
+		const otherCount = [ ...this.markerOwners ].reduce( ( count, [ currentOwner, current ] ) => count + ( currentOwner === owner ? 0 : current.length ), 0 );
+		check( otherCount + detached.length <= 128, 'presentation.markers', 'run limit of 128 markers exceeded' );
+		if ( detached.length ) this.markerOwners.set( owner, Object.freeze( detached ) );
+		else this.markerOwners.delete( owner );
+
+	}
+
+	markers() {
+
+		if ( terminal.has( this.state ) ) return Object.freeze( [] );
+		return Object.freeze( [ ...this.markerOwners.values() ].flat().map( ( marker ) => Object.freeze( { ...marker,
+			label: marker.countdownTo === undefined ? marker.label : `${marker.label} · ${formatTime( marker.countdownTo - this.time )}` } ) ) );
 
 	}
 
@@ -218,7 +375,7 @@ export class ScenarioRuntime {
 	setCrowdMode( value, mode ) {
 
 		this.writable();
-		check( [ 'hold', 'march', 'riot', 'sit', 'shield', 'push' ].includes( mode ), 'crowd.mode', 'must be hold, march, riot, sit, shield or push' );
+		check( [ 'hold', 'march', 'riot', 'sit', 'shield', 'push', 'storm', 'panic', 'disperse' ].includes( mode ), 'crowd.mode', 'unsupported civilian mode' );
 		const actor = this.crowdRecord( value ), result = this.adapter.setCrowdMode( actor.backend, mode );
 		if ( result.status === 'rejected' ) return Object.freeze( result );
 		this.event( 'crowd.mode-changed', { actor: actor.handle, mode } );
@@ -316,7 +473,7 @@ export class ScenarioRuntime {
 
 		this.writable();
 		fields( options, kind === 'vehicle' ? [ 'id', 'at', 'capacity', 'label', 'type', 'crew', 'selectable' ] : kind === 'crowd'
-			? [ 'id', 'at', 'people', 'spread', 'label', 'groupSize', 'agitation', 'resolve', 'morale', 'bikes', 'goal', 'goalRadius', 'mode', 'faction', 'points', 'standoff' ]
+			? [ 'id', 'at', 'people', 'spread', 'label', 'groupSize', 'agitation', 'resolve', 'morale', 'bikes', 'goal', 'goalRadius', 'mode', 'faction', 'points', 'standoff', 'medic', 'speed' ]
 			: kind === 'bystanders' ? [ 'id', 'people', 'destinations', 'groupSize', 'spread' ] : [ 'id', 'at', 'people', 'spread' ], `spawn.${kind}` );
 		check( typeof options.id === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test( options.id ), 'spawn.id', 'must be a lowercase slug' );
 		check( ! this.actors.has( options.id ), 'spawn.id', `'${options.id}' is already allocated` );
@@ -353,7 +510,7 @@ export class ScenarioRuntime {
 			const points = options.points === undefined ? null : Object.freeze( options.points.map( ( value, index ) => point( value, `spawn.points.${index}` ) ) );
 			for ( const [ key, value ] of [ [ 'morale', morale ], [ 'bikes', bikes ] ] ) check( Number.isFinite( value ) && value >= 0 && value <= 1, `spawn.${key}`, 'must be between 0 and 1' );
 			check( Number.isFinite( goalRadius ) && goalRadius > 0 && goalRadius <= 1000, 'spawn.goalRadius', 'must be positive and at most 1000 meters' );
-			check( [ 'hold', 'march', 'riot', 'sit' ].includes( mode ), 'spawn.mode', 'must be hold, march, riot or sit' );
+			check( [ 'hold', 'march', 'riot', 'sit', 'shield', 'push', 'storm', 'panic', 'disperse' ].includes( mode ), 'spawn.mode', 'unsupported civilian mode' );
 			check( mode !== 'sit' || points !== null, 'spawn.mode', 'sit mode requires points' );
 			check( points === null || bikes === 0, 'spawn.bikes', 'placed crowds walk' );
 			check( mode !== 'march' || goal !== null, 'spawn.goal', 'march mode requires a destination' );
@@ -372,7 +529,11 @@ export class ScenarioRuntime {
 				standoff = Object.freeze( { level: level ?? null, ceiling: ceiling ?? null, blows } );
 
 			}
-			crowdOptions = { groupSize, agitation: Object.freeze( [ ...agitation ] ), resolve: Object.freeze( [ ...resolve ] ), morale, bikes, goal, goalRadius, mode, faction, points, standoff };
+			const speed = options.speed ?? [ 0.85, 1.15 ];
+			check( Array.isArray( speed ) && speed.length === 2 && Array.from( speed ).every( ( value ) => Number.isFinite( value ) && value >= 0 && value <= 4 ) && speed[ 0 ] <= speed[ 1 ], 'spawn.speed', 'must be an ordered range from zero to four' );
+			check( options.medic === undefined || typeof options.medic === 'boolean', 'spawn.medic', 'must be boolean' );
+			crowdOptions = { groupSize, agitation: Object.freeze( [ ...agitation ] ), resolve: Object.freeze( [ ...resolve ] ), morale, bikes, goal, goalRadius, mode, faction, points,
+				standoff, medic: options.medic === true, speed: Object.freeze( [ ...speed ] ) };
 
 		} else if ( kind === 'bystanders' ) {
 
@@ -598,7 +759,7 @@ export class ScenarioRuntime {
 		check( raw && typeof raw === 'object' && Number.isFinite( raw.opinion ) && raw.opinion >= 0 && raw.opinion <= 100
 			&& Number.isInteger( escalation ) && escalation >= 0 && escalation <= 4
 			&& raw.counters && typeof raw.counters === 'object', 'metrics', 'adapter returned invalid semantic metrics' );
-		const counters = Object.fromEntries( [ 'injuriesByPolice', 'otherInjuries', 'officersInjured', 'arrests', 'sitterArrests', 'peopleGone', 'gasUsed', 'shotsFired' ].map( ( key ) => {
+		const counters = Object.fromEntries( [ 'injuriesByPolice', 'otherInjuries', 'officersInjured', 'arrests', 'sitterArrests', 'peopleGone', 'gasUsed', 'shotsFired', 'treatedByMedics', 'peopleKilled', 'officersKilled' ].map( ( key ) => {
 
 			const value = raw.counters[ key ] ?? 0;
 			check( Number.isFinite( value ) && value >= 0, `metrics.counters.${key}`, 'must be a non-negative finite number' );
@@ -649,6 +810,7 @@ export class ScenarioRuntime {
 		check( Number.isInteger( step ) && step >= 0 && step <= this.step, 'observation.step', 'must be a represented simulation step' );
 		if ( this.observation && ( sampledAt < this.observation.sampledAt || step < this.observation.step ) ) return;
 		const actors = [];
+		this.adapter.observePolicies?.( sample );
 		for ( const record of this.actors.values() ) {
 
 			if ( record.backend === null ) continue;
@@ -671,6 +833,7 @@ export class ScenarioRuntime {
 
 			try {
 
+				this.effects.observe( this.observation );
 				for ( const { type, ...event } of vehicleEvents ) this.event( type, event );
 				for ( const { type, ...event } of identityEvents ) this.event( type, event );
 				this.movement.observe( this.observation ); this.behaviors.dispatch( 'observe', this.observation );
@@ -710,6 +873,7 @@ export class ScenarioRuntime {
 		if ( this.state !== 'running' ) return;
 		this.time += dt;
 		this.step ++;
+		try { this.adapter.updateAmbient?.( dt ); this.adapter.updateShelters?.(); } catch ( error ) { this.fail( error ); return; }
 		try { this.convoys.update( dt ); this.custody.update(); } catch ( error ) { this.fail( error ); return; }
 		const objective = this.definition.objectives[ 0 ];
 		if ( objective.kind === 'prevent-clash' ) this.clashPressure = advanceClash( this.clashPressure, this.metrics().clashContacts, dt );
@@ -718,7 +882,13 @@ export class ScenarioRuntime {
 		if ( objective.kind === 'hold-building' ) {
 
 			const measured = this.spatial.measureBuilding( objective.target, objective.exitAt );
-			if ( measured ) this.buildingState = advanceBuilding( this.buildingState, measured, dt );
+			if ( measured ) {
+
+				const previous = this.buildingState;
+				this.buildingState = advanceBuilding( previous, measured, dt );
+				this.event( 'building.pressure', { target: objective.target, previous, current: this.buildingState } );
+
+			}
 			const outcome = this.evaluateOutcomes();
 			if ( this.state !== 'running' ) return;
 			if ( outcome ) { this.finish( outcome.win, outcome.reason ); return; }
@@ -844,6 +1014,7 @@ export class ScenarioRuntime {
 		this.movement.stopAll();
 		this.transport.stopAll();
 		for ( const operation of [ ...this.operations ] ) operation.cancel( 'scenario finished' );
+		this.markerOwners.clear();
 		this.onFinish( this.result );
 
 	}
@@ -927,6 +1098,7 @@ export class ScenarioRuntime {
 
 		if ( terminal.has( this.state ) ) return;
 		this.state = 'failed';
+		this.markerOwners.clear();
 		this.error = error;
 		this.commands.stopAll(); this.resources.dispose();
 		this.convoys.dispose();
@@ -945,6 +1117,7 @@ export class ScenarioRuntime {
 
 		if ( this.state === 'disposed' ) return;
 		this.state = 'disposed';
+		this.markerOwners.clear();
 		this.commands.stopAll(); this.resources.dispose();
 		this.convoys.dispose();
 		this.behaviors.stopAll( 'disposed' );

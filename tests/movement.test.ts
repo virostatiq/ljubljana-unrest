@@ -314,7 +314,7 @@ test( 'score adapter exposes only immutable semantic opinion and counters', () =
 		arrestedSitters: 0, gone: 5, gas: 2, shot: 0 } };
 	const metrics = new ScenarioEngine( mission ).readMetrics();
 	assert.deepEqual( metrics, { opinion: 47.5, escalation: 0, clashContacts: 0, counters: { injuriesByPolice: 3, otherInjuries: 2, officersInjured: 1,
-		arrests: 4, sitterArrests: 0, peopleGone: 5, gasUsed: 2, shotsFired: 0 } } );
+		arrests: 4, sitterArrests: 0, peopleGone: 5, gasUsed: 2, shotsFired: 0, treatedByMedics: 0, peopleKilled: 0, officersKilled: 0 } } );
 	assert.equal( Object.isFrozen( metrics ), true ); assert.equal( Object.isFrozen( metrics.counters ), true );
 
 } );
@@ -400,6 +400,17 @@ test( 'base firearms effect accepts a captured squad list and keeps default squa
 	assert.ok( hit.some( ( entry ) => entry[ 0 ] === 0 ) );
 	assert.ok( hit.some( ( entry ) => entry[ 0 ] > 0 ) );
 	assert.equal( mission.counters.shot, hit.length );
+
+} );
+
+test( 'stationary SDK crowds share exit navigation instead of allocating a field for every onlooker group', async () => {
+
+	let allocated = 0; const layers = [];
+	const engine = new ScenarioEngine( { runtime: { random: () => 0 }, crowd: { count: 0, N: 10000, G: 1000 },
+		world: { groups: [], exits: async () => 3, fieldTo: () => { allocated ++; throw new Error( 'unnecessary private field' ); },
+			bloc: async ( options ) => { layers.push( options.layer ); return []; } } } );
+	for ( let index = 0; index < 100; index ++ ) await engine.allocate( 'crowd', { id: `onlooker-${index}`, people: 20, groupSize: 20, at: [ index, 0 ], goal: null, speed: [ 0, 0 ], mode: 'hold', faction: 'bystander' }, new AbortController().signal );
+	assert.equal( allocated, 0 ); assert.equal( layers.length, 100 ); assert.ok( layers.every( ( layer ) => layer === 3 ) );
 
 } );
 

@@ -5,6 +5,7 @@ import { RallyMission } from '../src/game/missions/rally.ts';
 import { STAT } from '../src/sim/crowd.ts';
 import { defineScenario, holdCrowd, place } from '../src/game/scenarios/definition.ts';
 import { ScenarioRuntime } from '../src/game/scenarios/runtime.ts';
+import * as sdk from '../src/game/scenarios/index.ts';
 
 function buildRally() {
 
@@ -15,6 +16,7 @@ function buildRally() {
 		holdCrowd: ( value ) => ( { ...value, kind: 'hold-crowd' } ),
 		landmark: ( name ) => ( { kind: 'landmark', name } ), place: ( name ) => ( { kind: 'place', name } ),
 		policeCommands: ( options ) => [ { kind: 'police-command', id: 'gas', resource: options.gas } ],
+		protestCommands: sdk.protestCommands, scenarioCommand: sdk.scenarioCommand,
 	} );
 	return { definition, behavior };
 
@@ -274,11 +276,8 @@ test( 'Rally key calls spawn momentum-scaled arrivals and respect the 30-second 
 test( 'Rally crowd-hold objective matches native win boundary and full-duration timeout', async () => {
 
 	const definition = defineScenario( { id: 'rally-parity', side: 'protest', title: 'Rally', subtitle: 'Hold', brief: 'Hold.',
-		locations: { square: place( 'Square' ) }, objectives: [ holdCrowd( { id: 'hold-square', at: 'square', radius: 60,
-			minimumPeople: 5000, holdSeconds: 180, timeoutSeconds: 1200, reason: 'Trg republike belongs to the people tonight.',
-			timeoutReason: 'The night is over — the square was never held long enough.',
-			populationFailureReason: 'The protest fizzled out.' } ) ] } );
-	const run = async ( populationAt ) => {
+		locations: { square: place( 'Square' ) }, objectives: ( rallyScenario as any )( sdk ).objectives } );
+	const run = async ( populationAt, totalAt: ( seconds: number ) => number = () => 2500 ) => {
 		const runtime = new ScenarioRuntime( definition, { place: () => [ 0, 0 ], readMetrics: () => ( { opinion: 50, counters: {} } ), release() {} } );
 		await runtime.setup();
 		runtime.observation = { actors: [], people: [] }; await runtime.start();
@@ -289,11 +288,14 @@ test( 'Rally crowd-hold objective matches native win boundary and full-duration 
 		for ( let step = 1; step <= 1201 && ! nativeResult; step ++ ) {
 
 			headcount = populationAt( step );
-			native.t = step; native.stats[ STAT.PROT ] = 2500;
+			native.t = step; native.stats[ STAT.PROT ] = Math.max( headcount, totalAt( step ) );
 			RallyMission.prototype.tick.call( native, 1 );
 			const inSquare = Array.from( { length: headcount }, () => ( { faction: 'protester', status: 'active', agitation: 0, position: [ 0, 0 ] } ) );
-			runtime.observation = { actors: [], people: inSquare };
+			const outside = Array.from( { length: Math.max( 0, totalAt( step ) - headcount ) }, () => ( { faction: 'protester', status: 'active', agitation: 0, position: [ 100, 100 ] } ) );
+			runtime.observation = { actors: [], people: [ ...inSquare, ...outside ] };
 			runtime.update( 1 );
+			assert.equal( runtime.heldCrowdSeconds, native.held );
+			assert.equal( Boolean( runtime.result ), Boolean( nativeResult ), `terminal state at ${step}s` );
 			if ( nativeResult ) {
 
 				assert.deepEqual( { win: runtime.result.win, reason: runtime.result.reason, time: runtime.time }, nativeResult );
@@ -309,8 +311,27 @@ test( 'Rally crowd-hold objective matches native win boundary and full-duration 
 
 	const win = await run( ( second ) => second >= 101 && second <= 280 ? 5000 : 0 );
 	assert.deepEqual( win.nativeResult, { win: true, reason: 'Trg republike belongs to the people tonight.', time: 280 } );
+	const interrupted = await run( ( second ) => second <= 90 || second >= 1000 ? 5000 : 4999 );
+	assert.deepEqual( interrupted.sdkResult, { win: true, reason: 'Trg republike belongs to the people tonight.', time: 1089 } );
+	const collapse = await run( () => 0, () => 499 );
+	assert.deepEqual( collapse.sdkResult, { win: false, reason: 'The protest fizzled out.', time: 61 } );
 	const timeout = await run( () => 0 );
 	assert.deepEqual( timeout.nativeResult, { win: false, reason: 'The night is over — the square was never held long enough.', time: 1201 } );
 	assert.deepEqual( timeout.sdkResult, timeout.nativeResult );
+
+} );
+
+test( 'Rally candidate score matches the native time, casualty boundaries and result rows', () => {
+
+	const { definition } = buildRally();
+	for ( const win of [ false, true ] ) for ( const time of [ 719.9, 720, 720.1, 1201 ] ) for ( const officersInjured of [ 10, 11 ] ) {
+
+		const counters = { injByPolice: 30, injPolice: officersInjured, arrested: 40, gone: 50 };
+		const expected = RallyMission.prototype.score.call( { t: time, opinion: 54.6, counters } as any, win );
+		const actual = definition.score( { win, time, metrics: { opinion: 54.6,
+			counters: { injuriesByPolice: 30, officersInjured, arrests: 40, peopleGone: 50 } } } );
+		assert.deepEqual( actual, expected );
+
+	}
 
 } );

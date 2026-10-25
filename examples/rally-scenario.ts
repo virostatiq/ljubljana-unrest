@@ -38,7 +38,7 @@ function approaches( ctx: Pick<Sdk.ScenarioContext, 'locations' | 'spatial'> ): 
 
 }
 
-export default ( { defineScenario, defineBehavior, holdCrowd, landmark, place, policeCommands }: typeof Sdk ) => {
+export default ( { defineScenario, defineBehavior, holdCrowd, landmark, place, policeCommands, protestCommands, scenarioCommand }: typeof Sdk ) => {
 
 	const director = defineBehavior( {
 		id: 'rally-crowd-and-police',
@@ -388,6 +388,7 @@ export default ( { defineScenario, defineBehavior, holdCrowd, landmark, place, p
 				},
 				onEvent( ctx, event ) {
 
+					if ( event.type === 'command.applied' && event.command === 'rally-call' ) { this.onAction( ctx, { type: 'key', key: 'r', at: event.at } ); return; }
 					if ( event.type !== 'snatch.completed' && event.type !== 'snatch.abandoned' && event.type !== 'snatch.cancelled' ) return;
 					const reserve = snatchReserves.get( event.operation );
 					if ( reserve ) { snatchReserves.delete( event.operation ); busyReserves.delete( reserve ); }
@@ -403,7 +404,7 @@ export default ( { defineScenario, defineBehavior, holdCrowd, landmark, place, p
 		brief: 'Coordinate the protest. Bring 5,000 people onto Trg republike and hold the square for three minutes. Rally calls bring more people in from across town.',
 		goals: [ 'Get 5,000 protesters onto Trg republike', 'Hold the square for 3:00 in total', 'Keep the protest alive' ],
 		tips: [ 'Select a group and right-click to move it', 'Rally call (R) brings 200 to 1,100 people toward the square; calls recharge after 30 seconds' ],
-		resources: { gas: { capacity: 46 } }, commands: policeCommands( { gas: 'gas' } ),
+		resources: { gas: { capacity: 46 }, rally: { capacity: 99, cooldown: 30 } }, commands: [ ...policeCommands( { gas: 'gas' } ), ...protestCommands(), scenarioCommand( { id: 'rally-call', key: 'r', label: 'Rally call', resource: 'rally', side: 'protest' } ) ],
 		locations: { square: place( 'Trg republike' ), preseren: place( 'Prešernov trg' ), kongresni: place( 'Kongresni trg' ),
 			metelkova: place( 'Metelkova' ), tivoli: place( 'Park Tivoli' ), railway: landmark( 'Železniška postaja' ),
 			station: landmark( 'PU Ljubljana' ), 'police-center': landmark( 'PP Ljubljana Center' ), mestni: place( 'Mestni trg' ), dragon: place( 'Zmajski most' ) },

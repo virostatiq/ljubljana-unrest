@@ -32,6 +32,13 @@ export class BehaviorHost {
 				id: instance.id,
 				signal: instance.controller.signal,
 				people: this.runtime.identity.peopleContext( instance ),
+				effects: this.runtime.effects.context( instance ),
+				opinion: Object.freeze( { adjust: ( delta, reason ) => { this.writable( instance ); this.runtime.context.opinion.adjust( delta, reason ); } } ),
+				actors: Object.freeze( { ...this.runtime.context.actors,
+					split: ( actor ) => { this.writable( instance ); return this.runtime.splitActor( actor ); },
+					merge: ( actors ) => { this.writable( instance ); return this.runtime.mergeActors( actors ); },
+					configure: ( actor, options ) => { this.writable( instance ); return this.runtime.configureActor( actor, options ); },
+					recruit: ( actor ) => { this.writable( instance ); return this.runtime.recruitActor( actor ); } } ),
 				protected: this.runtime.identity.context( instance ),
 				vehicles: this.runtime.transport.context( instance ),
 				commands: this.runtime.commands.context( instance ),
@@ -41,7 +48,11 @@ export class BehaviorHost {
 					nudge: ( actor, options ) => { this.writable( instance ); return this.runtime.context.crowd.nudge( actor, options ); },
 					setMorale: ( actor, morale ) => { this.writable( instance ); return this.runtime.context.crowd.setMorale( actor, morale ); },
 				} ),
-				presentation: Object.freeze( { focus: ( at, zoom ) => {
+				presentation: Object.freeze( { markers: ( markers ) => {
+
+					this.writable( instance ); this.runtime.setMarkers( instance, markers );
+
+				}, focus: ( at, zoom ) => {
 
 					this.writable( instance ); this.runtime.context.presentation.focus( at, zoom );
 
@@ -184,6 +195,7 @@ export class BehaviorHost {
 		instance.state = reason === 'completed' ? 'completed' : 'stopped';
 		instance.controller.abort( reason );
 		this.runtime.clearCoach( instance );
+		this.runtime.markerOwners.delete( instance );
 		this.runtime.commands.releaseOwner( instance );
 		for ( const timer of instance.timers ) if ( timer.state === 'pending' ) timer.state = 'cancelled';
 		instance.timers = [];

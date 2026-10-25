@@ -71,8 +71,20 @@ export interface SpatialCountOptions {
     minimumAgitation?: number;
 }
 
-/** Read-only geometry/measurement queries, returning null rather than inventing unavailable counts. */
+/** Geometry, sampled measurements and gameplay placement; unavailable counts return null. */
 export interface SpatialContext {
+    /** Distance along a bounded ray until a building/obstacle; optional raw-building query ignores authored barriers. */
+    ray(from: string | Point, angle: number, range?: number, ignoreBarriers?: boolean): number;
+    /** Copied authored city route, in local meters. */
+    route(): readonly Point[];
+    /** Copied directional carriageway polylines on maps with motorway traffic. */
+    carriageways(): readonly (readonly Point[])[];
+    /** Host street traversal cost from zero to 255. */
+    cost(at: string | Point): number;
+    /** Semantic CCTV coverage at the point, zero when uncovered. */
+    cctv(at: string | Point): number;
+    /** Building-clear line of sight; at most 1000 meters. */
+    visible(from: string | Point, to: string | Point): boolean;
     /** Count active eligible people; null means a population actor lacks a complete observation. */
     count(options: SpatialCountOptions): number | null;
     /** Return setup-time target geometry with objective-consistent adjusted exits. */
@@ -81,10 +93,19 @@ export interface SpatialContext {
     building(targetAlias: string, exitAt?: Readonly<Record<number, Point>>): BuildingMeasurement | null;
     /** Nearest connected street point with host clearance; default search 60 meters, maximum 1000. */
     walkable(at: string | Point, radius?: number): Point | null;
+    /** Generate a randomized gameplay placement point, not a test hook or an observation sample.
+     * Used for crowd/guard positions and movement targets; does not spawn or move an actor.
+     * Each call consumes the scenario RNG. Use walkable for nearest connected-street placement.
+     * Radius is positive and at most 1000 m; native retries can extend beyond it.
+     * streetOnly defaults to true. Returns the requested point if all native attempts fail.
+     */
+    sample(at: string | Point, options: { radius: number; streetOnly?: boolean }): Point;
     /** Shortest host-measured road span through a point, with wall-to-wall endpoints and width in meters. */
     roadSpan(at: string | Point, maxDistance?: number): RoadSpan;
     /** Meters from the point to the nearest building or obstacle; null when the map cannot say. */
     clearance(at: string | Point): number | null;
+    /** Outer footprint containing the point, copied and frozen; null if no building contains it. */
+    footprint(at: string | Point): readonly number[] | null;
     /** Map-edge street entries where arriving crowds come from, with their street names when known. */
     entries(): readonly { readonly name: string | null; readonly position: Point }[];
 }
@@ -98,7 +119,7 @@ export interface RoadSpan {
 
 /** Synchronous civilian crowd mutation; implementation details remain inside the host adapter. */
 /** Civilian crowd behaviour: shield is a march behind locked arms, push leans on police lines. */
-export type CrowdMode = 'hold' | 'march' | 'riot' | 'sit' | 'shield' | 'push';
+export type CrowdMode = 'hold' | 'march' | 'riot' | 'sit' | 'shield' | 'push' | 'storm' | 'panic' | 'disperse';
 
 export type CrowdMutationResult =
     | { readonly status: 'completed'; readonly value: { readonly actor: ActorHandle; readonly mode?: CrowdMode; readonly people?: number; readonly morale?: number } }
@@ -168,6 +189,12 @@ export interface ScenarioMetrics {
         gasUsed: number;
         /** People affected by firearm actions. */
         shotsFired: number;
+        /** Injured protesters removed by registered medics. */
+        treatedByMedics: number;
+        /** Observed fatalities, including all factions. */
+        peopleKilled: number;
+        /** Observed officer fatalities. */
+        officersKilled: number;
     }>;
 }
 
@@ -236,6 +263,30 @@ export type ScenarioScoring = (context: ScenarioScoreContext) => ScenarioScore;
 
 /** Standard semantic IDs; key bindings are host presentation, not execution IDs. */
 export type PoliceCommandId = 'charge' | 'arrest' | 'snatch' | 'kettle' | 'shield-push' | 'crew' | 'water' | 'gas' | 'reinforce' | 'firearms';
+/** Standard commands for selected protester actors. */
+export type ProtestCommandId = 'hold' | 'sit' | 'shield' | 'scatter' | 'disperse' | 'fire-up' | 'calm' | 'umbrella' | 'split' | 'merge';
+/** Standard player or behavior command identifier. */
+export type CommandId = PoliceCommandId | ProtestCommandId | (string & {});
+/** Scenario-owned order metadata. Applied means issued, not a physical task outcome. */
+export interface ScenarioCommandDefinition {
+    readonly kind: 'scenario-command';
+    readonly id: string;
+    readonly key: string;
+    readonly label: string;
+    readonly resource: string | null;
+    readonly selection?: 'crowd' | 'squad' | 'vehicle' | false;
+    readonly side?: 'police' | 'protest';
+    readonly needsSelection: boolean;
+    readonly escalation: 0;
+}
+/** Protest selection command, optionally charged to umbrella inventory. */
+export interface ProtestCommandDefinition {
+    readonly kind: 'protest-command';
+    readonly id: ProtestCommandId;
+    readonly resource: string | null;
+}
+/** Validated standard command configuration. */
+export type CommandDefinition = PoliceCommandDefinition | ProtestCommandDefinition | ScenarioCommandDefinition;
 
 /** Opaque supported command definition returned by policeCommands. */
 export interface PoliceCommandDefinition {
@@ -250,7 +301,11 @@ export interface PoliceCommandDefinition {
 }
 
 /** Read-only UI metadata; execution still validates all preconditions. */
-export interface PoliceCommandInfo extends PoliceCommandDefinition {
+export interface PoliceCommandInfo extends Omit<PoliceCommandDefinition, 'kind' | 'id'> {
+    readonly kind: 'police-command' | 'protest-command' | 'scenario-command';
+    readonly id: CommandId;
+    /** Protest orders are shown only for the protest player's controls. */
+    readonly side?: 'police' | 'protest';
     /** Default single-letter shortcut. */
     readonly key: string;
     /** Default host label. */
@@ -360,7 +415,7 @@ export interface CommandRequest {
 /** Successful application to host simulation, not proof of arrival, an arrest, or an injury. */
 export interface CommandReceipt {
     /** Semantic command ID. */
-    readonly command: PoliceCommandId;
+    readonly command: CommandId;
     /** Captured resolved destination. */
     readonly at: Point;
     /** Original validated selection, unaffected by later UI selection changes. */
@@ -401,7 +456,7 @@ export interface CommandContext {
     /** Enabled standard commands and their current static metadata. */
     list(): readonly PoliceCommandInfo[];
     /** Execute for the owning behavior; other owners/player movement may prevent control acquisition. */
-    execute(id: PoliceCommandId, request: CommandRequest): CommandOperation;
+    execute(id: CommandId, request: CommandRequest): CommandOperation;
 }
 
 /** Opaque reference to a host-owned kinematic convoy on the selected city's route. */
@@ -606,6 +661,10 @@ export interface SpawnOptions {
 
 /** Civilian group spawn options used by wave and ambient population behaviors. */
 export interface CrowdSpawnOptions extends SpawnOptions {
+    /** Register this actor for native nearby-injury treatment. */
+    medic?: boolean;
+    /** Native group speed range, bounded from zero to four; default [0.85,1.15]. */
+    speed?: readonly [number, number];
     /** Group display label; defaults to actor ID. */
     label?: string;
     /** People per backing simulation group; integer 1..500, default 60. */
@@ -712,6 +771,8 @@ export interface PersonHandle {
 
 /** Sampled person state. A missing sample is unavailable, not evidence of death or removal. */
 export interface PersonObservation {
+    /** Sampled injury attribution when known; null for active, detained or terminal people. */
+    readonly injurySource: 'police' | 'other' | null;
     /** Stable reference to the sampled person. */
     readonly handle: PersonHandle;
     /** Actor containing this person in the current observed membership. */
@@ -918,6 +979,8 @@ export interface VehicleContext {
 
 /** Explicit actor-based protection rules; these do not alter faction or physical arrest state. */
 export interface ProtectionOptions {
+    /** Capture/recovery radius while down; defaults to the standing radius. */
+    downRadius?: number;
     /** Friendly actor IDs, including the initial subject actor; distinct from hostile IDs. */
     friendly: readonly string[];
     /** Actor IDs counted as hostile pressure, regardless of their simulation faction. */
@@ -1093,8 +1156,42 @@ export interface Operation<Result> {
     cancel(reason?: string): Readonly<{ status: 'requested' | 'already-settled' | 'too-late' }>;
 }
 
+/** Semantic circle annotation drawn by the host's existing map overlay, not a gameplay zone. */
+export interface MapMarker {
+    /** Optional host-rendered polygon/path, without exposing Canvas to plugins. */
+    shape?: 'polygon' | 'path';
+    /** Two to 512 points for paths, three to 512 for polygons. */
+    points?: readonly Point[];
+    /** Owner-local lowercase slug; different behaviors may reuse the same ID. */
+    id: string;
+    /** Declared location alias or local map coordinates in meters. */
+    at: string | Point;
+    /** Circle radius in meters, positive and at most 1000. */
+    radius: number;
+    /** Single-line annotation, at most 160 characters. */
+    label: string;
+    /** Semantic host color; defaults to info. */
+    kind?: 'info' | 'good' | 'warn' | 'bad';
+    /** Absolute game time; appends a clamped m:ss countdown without wall-clock timers. */
+    countdownTo?: number;
+}
+
 /** Public setup/query capabilities; no Game, World, DOM, GPU buffers or raw simulation indices. */
 export interface ScenarioContext {
+    /** Explicit source-backed opinion changes. */
+    readonly opinion: { adjust(delta: number, reason: string): void };
+    /** Setup-only physical environment configuration; no raw shader uniforms. */
+    readonly environment: { configure(options: { wind?: Point; leadersVisible?: boolean; resolveDecay?: number; holdRestraint?: number; southExits?: boolean }): Promise<void>;
+        /** Open a local SDF gap in a declared barrier, with radius at most twenty meters. */
+        openBarrier(id: string, options: { at: string | Point; radius: number }): void };
+    /** Conditional person effects; queued receipts are confirmed or rejected by later sampled facts. */
+    readonly effects: {
+        /** Queue a bounded active-person agitation/resolve delta; does not claim a later net value. */
+        nudge(person: PersonHandle, options: { agitation?: number; resolve?: number; expectedSample: number }): { readonly status: 'queued' | 'rejected'; readonly code?: string };
+        apply(person: PersonHandle, options: { status: 'injured' | 'dead' | 'detained' | 'removed'; source?: 'police' | 'other'; expectedSample: number }):
+            { readonly status: 'queued'; readonly value: Readonly<{ person: PersonHandle; status: string; source: string; sample: number; step: number }> }
+            | { readonly status: 'rejected'; readonly code: string };
+    };
     /** Live immutable semantic opinion/counter snapshot for decisions and scoring policies. */
     readonly metrics: ScenarioMetrics;
     /** Immutable inventory queries; only command execution reserves/spends in this slice. */
@@ -1151,13 +1248,26 @@ export interface ScenarioContext {
     };
     /** Actor handles and their latest sampled aggregates. */
     readonly actors: {
+        /** Split an eligible civilian actor into balanced subgroups. Protected/controlled actors reject. */
+        split(actor: ActorHandle | string): { readonly status: 'completed'; readonly value: ActorHandle } | { readonly status: 'rejected'; readonly code: 'TOO_SMALL' | 'PROTECTED_ACTOR' | 'CONTROL_BUSY' };
+        /** Merge active civilian actors of one faction; protected/controlled actors reject atomically. */
+        merge(actors: readonly (ActorHandle | string)[]): { readonly status: 'completed'; readonly value: ActorHandle } | { readonly status: 'rejected'; readonly code: 'PROTECTED_ACTOR' | 'CONTROL_BUSY' | 'FACTION' | 'TOO_SMALL' };
+        /** Validated semantic state changes on a population actor; speed is zero to four. */
+        configure(actor: ActorHandle | string, options: { speed?: number; masked?: boolean; identified?: boolean; parting?: boolean; home?: boolean }): { readonly status: 'completed' };
+        /** Convert sampled active bystanders into protesters atomically in host membership. */
+        recruit(actor: ActorHandle | string): { readonly status: 'completed'; readonly people: number } | { readonly status: 'rejected'; readonly code: string };
         /** Return null before valid sample data exists; invalid/foreign handles throw. */
         get(handle: ActorHandle): ActorObservation | null;
         /** Resolve an allocated actor ID, including a spawn still awaiting completion. */
         resolve(id: string): ActorHandle
     };
-    /** Presentation capabilities currently limited to initial camera framing. */
+    /** Host-rendered annotations, notifications and camera framing. */
     readonly presentation: {
+        /** Atomically replace this owner's markers; [] clears them. Maximum 64 per owner,
+         * 128 per run. Inputs are validated and copied. Behavior markers clear on stop;
+         * all markers clear on finish, failure or disposal. No gameplay effects.
+         */
+        markers(markers: readonly MapMarker[]): void;
         /** Owner-scoped text notification and optional map ping; not a gameplay event. */
         notice(text: string, kind?: 'info' | 'good' | 'warn' | 'bad', at?: string | Point | null): void;
         /** Set initial center and meters per screen pixel (default 0.5); smaller values zoom in. */
@@ -1276,7 +1386,34 @@ export type ProtectedEvent =
     });
 
 /** Built-in event vocabulary for this preview; arbitrary custom event registration is not exposed. */
-export type ScenarioEvent = MovementEvent | ProtectedEvent | PersonEvent | VehicleEvent | TransportEvent | CommandEvent | SnatchTaskEvent | CrowdEvent | CustodyEvent;
+export type ScenarioEvent = MovementEvent | ProtectedEvent | PersonEvent | VehicleEvent | TransportEvent | CommandEvent | SnatchTaskEvent | CrowdEvent | CustodyEvent | BuildingPressureEvent | PersonEffectEvent;
+
+/** Requested effects and later observed confirmation are intentionally distinct. */
+export interface PersonEffectEvent {
+    readonly type: 'effect.queued' | 'effect.confirmed' | 'effect.rejected';
+    readonly sequence: number;
+    readonly time: number;
+    readonly person: PersonHandle;
+    readonly status: 'injured' | 'dead' | 'detained' | 'removed';
+    readonly source: 'police' | 'other';
+    readonly observed?: PersonObservation['status'];
+}
+
+/** Integrated building pressure after an update with complete observations, before terminal rules run. */
+export interface BuildingPressureEvent {
+    /** Semantic building-objective update; absent when measurements are unavailable. */
+    readonly type: 'building.pressure';
+    /** Monotonic run event sequence. */
+    readonly sequence: number;
+    /** Current game time in seconds. */
+    readonly time: number;
+    /** Declared target alias. */
+    readonly target: string;
+    /** Immutable pressure state before integration. */
+    readonly previous: Readonly<{ breach: number; evacuation: number; blocked: readonly boolean[]; facade: number }>;
+    /** Immutable pressure state after integration. */
+    readonly current: BuildingPressureEvent['previous'];
+}
 
 /** Actor-level crowd mode or bounded agitation/resolve effect. */
 export interface CrowdEvent {
@@ -1307,7 +1444,7 @@ export interface CommandEvent {
     /** Game time of dispatch. */
     readonly time: number;
     /** Semantic command ID, not a raw key code. */
-    readonly command: PoliceCommandId;
+    readonly command: CommandId;
     /** Operation ID linking all lifecycle events. */
     readonly operation: string;
     /** Captured target coordinates. */
@@ -1421,9 +1558,9 @@ export interface BehaviorContext extends ScenarioContext {
     /** Commands with owner-scoped visibility locks for guided interactions. */
     readonly commands: CommandContext & {
         /** Hide a configured command while this behavior remains active. */
-        lock(id: PoliceCommandId): void;
+        lock(id: CommandId): void;
         /** Remove this behavior's lock; other owners may still keep the command hidden. */
-        unlock(id: PoliceCommandId): void;
+        unlock(id: CommandId): void;
     };
     /** Owned step-by-step coach card; it clears automatically when this behavior stops. */
     readonly presentation: ScenarioContext['presentation'] & {
@@ -1597,12 +1734,14 @@ export interface OpinionPolicy {
 }
 
 export interface ScenarioOptions {
+    /** Bounded pre-spawn map barriers, privately applied by the host. */
+    terrain?: readonly { id: string; polygon: readonly Point[]; halfWidth?: number; excludeInterior?: boolean }[];
     /** Finite named resources; default empty. */
     resources?: Record<string, ResourceOptions>;
     /** Opt-in standard police orders; protest-side scenarios can use these for behavior-owned AI, not player controls. */
-    commands?: readonly PoliceCommandDefinition[];
+    commands?: readonly CommandDefinition[];
     /** Commands hidden from the first briefing until an owning behavior unlocks them. */
-    initiallyLockedCommands?: readonly PoliceCommandId[];
+    initiallyLockedCommands?: readonly CommandId[];
     /** Optional synchronous outcome score policy; return a validated 0..3 stars and result rows. */
     score?: ScenarioScoring;
     /** Ordered terminal outcome rules; the first matching rule wins before the default objective result. */
@@ -1650,12 +1789,13 @@ export interface ScenarioOptions {
 
 /** Normalized immutable definition returned by defineScenario, not a running scenario instance. */
 export interface ScenarioDefinition {
+    readonly terrain: readonly { readonly id: string; readonly polygon: readonly Point[]; readonly halfWidth: number; readonly excludeInterior: boolean }[];
     /** Detached normalized resource capacities, initial amounts and cooldowns. */
     readonly resources: Readonly<Record<string, ResourceDefinition>>;
     /** Frozen validated command definitions; default empty. */
-    readonly commands: readonly PoliceCommandDefinition[];
+    readonly commands: readonly CommandDefinition[];
     /** Frozen command IDs initially hidden until a behavior unlocks them. */
-    readonly initiallyLockedCommands: readonly PoliceCommandId[];
+    readonly initiallyLockedCommands: readonly CommandId[];
     /** Score policy, or null for the default three-star win/zero-star loss. */
     readonly score: ScenarioScoring | null;
     /** Ordered, frozen terminal outcome rules; defaults to none. */
@@ -1730,3 +1870,7 @@ export function followRoute(options: RouteOptions): BehaviorAttachment;
 /** Enable charge/arrest/kettle/shield push, optionally gas/reinforce with explicit resource bindings. */
 /** Enable charge/arrest/snatch/kettle/shield push, optionally gas/reinforce with explicit resource bindings. */
 export function policeCommands(options?: PoliceCommandOptions): readonly PoliceCommandDefinition[];
+/** Enable standard selected-crowd controls; umbrella optionally names a declared resource. */
+export function protestCommands(options?: { umbrella?: string }): readonly ProtestCommandDefinition[];
+/** Add a validated scenario order; handle its applied event in an owned behavior. */
+export function scenarioCommand(options: { id: string; key: string; label: string; resource?: string; selection?: 'crowd' | 'squad' | 'vehicle' | false; side?: 'police' | 'protest' }): ScenarioCommandDefinition;

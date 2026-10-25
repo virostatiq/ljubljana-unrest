@@ -16,6 +16,7 @@ import { Labels } from './labels.ts';
 import { Hud } from './ui/hud.ts';
 import { Overlay } from './ui/overlay.ts';
 import { Sound } from './audio/sound.ts';
+import { createScenarioPlaytest } from './game/scenarios/playtest.ts';
 
 if ( location.search.includes( 'debug' ) ) THREE.Node.captureStackTrace = true;
 
@@ -165,6 +166,7 @@ class Game {
 		boot.classList.add( 'hide' );
 		this.renderer.setAnimationLoop( () => this.frame() );
 		window.game = this;
+		if ( import.meta.env.DEV ) ( window as any ).scenarioPlaytest = createScenarioPlaytest( this );
 
 	}
 
