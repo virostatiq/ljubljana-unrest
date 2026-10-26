@@ -80,6 +80,17 @@ export class SpatialHost {
 		return Object.freeze( { a, b, width: Math.hypot( b[ 0 ] - a[ 0 ], b[ 1 ] - a[ 1 ] ) } );
 
 	}
+	roadRoute( from, to ) {
+
+		const route = this.runtime.adapter.roadRoute( this.runtime.location( from ), this.runtime.location( to ) );
+		if ( route === null ) return null;
+		check( Array.isArray( route ) && route.length > 0, 'spatial.roadRoute', 'host returned an invalid path' );
+		const points = Object.freeze( Array.from( route, ( at, index ) => point( at, `spatial.roadRoute.${index}` ) ) );
+		const length = points.slice( 1 ).reduce( ( total, at, index ) => total + Math.hypot( at[ 0 ] - points[ index ][ 0 ], at[ 1 ] - points[ index ][ 1 ] ), 0 );
+		check( Number.isFinite( length ), 'spatial.roadRoute', 'host returned an invalid path length' );
+		return Object.freeze( { points, length } );
+
+	}
 
 	prepareBuilding( alias, exitAt = {} ) {
 

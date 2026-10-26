@@ -192,6 +192,7 @@ export class ScenarioRuntime {
 
 				},
 				roadSpan: ( at, maxDistance = 30 ) => this.spatial.roadSpan( at, maxDistance ),
+				roadRoute: ( from, to ) => this.spatial.roadRoute( from, to ),
 				clearance: ( at ) => {
 
 					const value = this.adapter.clearance( this.location( at ) );
@@ -252,8 +253,8 @@ export class ScenarioRuntime {
 
 	configureActor( value, options ) {
 
-		this.writable(); fields( options, [ 'speed', 'masked', 'identified', 'parting', 'home' ], 'actors.configure' );
-		for ( const key of [ 'masked', 'identified', 'parting', 'home' ] ) check( options[ key ] === undefined || typeof options[ key ] === 'boolean', `actors.${key}`, 'must be boolean' );
+		this.writable(); fields( options, [ 'speed', 'masked', 'identified', 'parting', 'home', 'closed' ], 'actors.configure' );
+		for ( const key of [ 'masked', 'identified', 'parting', 'home', 'closed' ] ) check( options[ key ] === undefined || typeof options[ key ] === 'boolean', `actors.${key}`, 'must be boolean' );
 		check( options.speed === undefined || Number.isFinite( options.speed ) && options.speed >= 0 && options.speed <= 4, 'actors.speed', 'must be from zero to four' );
 		const handle = typeof value === 'string' ? this.context.actors.resolve( value ) : value; this.actor( handle );
 		check( handle.kind !== 'vehicle', 'actors.configure', 'requires a population actor' );

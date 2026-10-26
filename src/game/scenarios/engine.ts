@@ -34,6 +34,12 @@ export class ScenarioEngine {
 	sampleWalkable( at, radius, streetOnly, random ) { return this.mission.world.spot( ...at, radius, streetOnly, random ); }
 	walkable( at, radius ) { return this.mission.world.roadSpot( ...at, radius ); }
 	roadSpan( at, maxDistance ) { return this.mission.world.across( ...at, maxDistance ); }
+	roadRoute( from, to ) {
+
+		const patrols = this.mission.world.patrols, goal = patrols.snap( ...to ) ?? to;
+		return patrols.route( from, goal );
+
+	}
 	clearance( at ) { return this.mission.world.sdf( ...at ); }
 	footprint( at ) { return this.mission.city.buildings.find( ( building ) => inPoly( building.p[ 0 ], at[ 0 ], at[ 1 ] ) )?.p[ 0 ] ?? null; }
 	mapRoute() { return this.mission.city.route ?? []; }
@@ -90,7 +96,7 @@ export class ScenarioEngine {
 		for ( const group of groups ) {
 
 			if ( options.speed !== undefined ) this.mission.crowd.setGroup( group.id, { speed: options.speed } );
-			for ( const key of [ 'masked', 'identified' ] ) if ( options[ key ] !== undefined ) group[ key ] = options[ key ];
+			for ( const key of [ 'masked', 'identified', 'closed' ] ) if ( options[ key ] !== undefined ) group[ key ] = options[ key ];
 			if ( options.parting === true ) this.mission.crowd.u.parting.value = group.id;
 			if ( options.parting === false && this.mission.crowd.u.parting.value === group.id ) this.mission.crowd.u.parting.value = - 1;
 			if ( options.home === true && ! group.home ) Mission.prototype.sendHome.call( this.mission, group );
@@ -838,8 +844,8 @@ export class ScenarioEngine {
 		try {
 
 			signal.throwIfAborted();
-			const radius = request.id === 'kettle' ? Math.max( 14, Math.sqrt( groups.reduce( ( count, group ) => count + group.members.length, 0 ) ) * 2.6 ) : null;
-			layer = await world.fieldTo( ...request.at, request.id === 'kettle' ? radius + 10 : request.id === 'charge' ? 6 : request.id === 'arrest' ? 5 : 12 );
+			const radius = request.id === 'kettle' ? request.radius ?? Math.max( 14, Math.sqrt( groups.reduce( ( count, group ) => count + group.members.length, 0 ) ) * 2.6 ) : null;
+			layer = await world.fieldTo( ...request.at, request.id === 'kettle' ? radius + 10 : request.id === 'charge' ? 6 : request.id === 'arrest' ? request.radius ?? 5 : 12 );
 			signal.throwIfAborted(); world.flow.retain( layer );
 			return { layer, radius, actor, groups, applied: false };
 
@@ -932,7 +938,8 @@ export class ScenarioEngine {
 
 		} else if ( request.id === 'charge' ) work = world.charge( groups, ...request.at, { layer: prepared.layer, valid: current } );
 		else if ( request.id === 'arrest' && prepared.custody ) runtime.custody.start( groups, request.at );
-		else if ( request.id === 'arrest' ) work = world.arrest( groups, ...request.at, 5, null, { layer: prepared.layer, valid: current } );
+		else if ( request.id === 'arrest' ) work = world.arrest( groups, ...request.at, request.radius ?? 5,
+			request.radius === undefined ? null : request.at, { layer: prepared.layer, valid: current } );
 		else if ( request.id === 'kettle' ) work = world.kettle( groups, ...request.at, prepared.radius, world.intel.pos, { layer: prepared.layer, valid: current } );
 		else if ( request.id === 'reinforce' ) work = world.moveSquads( groups, ...request.at, { layer: prepared.layer, valid: current } );
 		if ( work ) work.catch( ( error ) => runtime.fail( error ) );

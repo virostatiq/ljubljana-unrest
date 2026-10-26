@@ -181,9 +181,13 @@ export class CommandHost {
 	execute( owner, id, options, source = 'behavior' ) {
 
 		this.runtime.writable();
-		fields( options, [ 'at', 'selection', 'opinion' ], 'commands.execute' );
+		fields( options, [ 'at', 'selection', 'opinion', 'radius' ], 'commands.execute' );
 		const definition = this.definitions.get( id );
 		check( definition, 'commands.execute.id', `unknown command '${id}'` );
+		check( options.radius === undefined || [ 'arrest', 'kettle' ].includes( id ), 'commands.execute.radius', 'is available only to arrest or kettle' );
+		const minimumRadius = id === 'kettle' ? 14 : 5;
+		check( options.radius === undefined || Number.isFinite( options.radius ) && options.radius >= minimumRadius && options.radius <= 100,
+			'commands.execute.radius', `must be from ${minimumRadius} to 100 meters` );
 		check( [ 'starting', 'running', 'paused' ].includes( this.runtime.state ), 'commands.execute', 'scenario has not started' );
 		if ( options.opinion !== undefined ) {
 
@@ -255,7 +259,8 @@ export class CommandHost {
 		const controller = new AbortController();
 		let resolve, done = false, timer;
 		const request = Object.freeze( { id, at, selection, source, custom: definition.kind === 'scenario-command', operation: operationId, ...( target ? { target } : {} ),
-			...( options.opinion === undefined ? {} : { opinion: Object.freeze( { delta: options.opinion.delta, reason: options.opinion.reason } ) } ) } );
+			...( options.opinion === undefined ? {} : { opinion: Object.freeze( { delta: options.opinion.delta, reason: options.opinion.reason } ) } ),
+			...( options.radius === undefined ? {} : { radius: options.radius } ) } );
 		const current = () => ! controller.signal.aborted && ( ! owner || [ 'starting', 'active' ].includes( owner.state ) ) && [ 'starting', 'running', 'paused' ].includes( this.runtime.state )
 			&& actors.every( ( actor ) => this.runtime.actors.get( actor.handle.id ) === actor && this.claims.get( actor.handle ) === operation );
 		const settle = ( outcome ) => {

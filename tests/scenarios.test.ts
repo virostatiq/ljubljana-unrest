@@ -11,6 +11,7 @@ import prideScenario from '../examples/pride-scenario.ts';
 import blackBlocScenario from '../examples/blackbloc-scenario.ts';
 import massacreScenario from '../examples/massacre-scenario.ts';
 import resnicaScenario from '../examples/resnica-scenario.ts';
+import rescueScenario from '../examples/rescue-scenario.ts';
 import { ClashMission, clashScenario as clashMission } from '../src/game/missions/clash.ts';
 import { RallyMission } from '../src/game/missions/rally.ts';
 import { STAT } from '../src/sim/crowd.ts';
@@ -201,6 +202,25 @@ test( 'spatial road spans validate host endpoints and return an immutable measur
 	assert.deepEqual( span, { a: [ 4, 20 ], b: [ 16, 20 ], width: 12 } );
 	assert.equal( Object.isFrozen( span ), true ); assert.equal( Object.isFrozen( span.a ), true );
 	assert.throws( () => spatial.roadSpan( 'street', 0 ), /maxDistance/ );
+
+} );
+
+test( 'road routes snap destinations and return detached measured paths', () => {
+
+	const source = [ [ 0, 0 ], [ 3, 4 ], [ 6, 6 ] ], calls = [];
+	const engine = Object.create( ScenarioEngine.prototype );
+	engine.mission = { world: { patrols: {
+		snap: ( x, y ) => [ x + 1, y + 1 ],
+		route: ( from, to ) => { calls.push( [ from, to ] ); return source; },
+	} } };
+	const spatial = new SpatialHost( { location: ( at ) => at, adapter: { roadRoute: ( from, to ) => engine.roadRoute( from, to ) } } );
+	const route = spatial.roadRoute( [ 0, 0 ], [ 5, 5 ] );
+	assert.deepEqual( calls, [ [ [ 0, 0 ], [ 6, 6 ] ] ] );
+	assert.deepEqual( route, { points: source, length: 5 + Math.hypot( 3, 2 ) } );
+	assert.ok( Object.isFrozen( route ) && Object.isFrozen( route.points ) && Object.isFrozen( route.points[ 1 ] ) );
+	source[ 1 ][ 0 ] = 99; assert.deepEqual( route.points[ 1 ], [ 3, 4 ] );
+	engine.mission.world.patrols.route = () => null;
+	assert.equal( spatial.roadRoute( [ 0, 0 ], [ 5, 5 ] ), null );
 
 } );
 
@@ -881,6 +901,21 @@ test( 'crowd standoff options are validated and passed on frozen; without them t
 
 } );
 
+test( 'actor configuration exposes the native closed-against-sway flag', async () => {
+
+	let configured;
+	const { runtime } = fixture( scenario( { setup( ctx ) { ctx.spawn.crowd( { id: 'militant', at: 'square' } ); } } ), {
+		configureActor: ( groups, options ) => { configured = options; return { status: 'completed' }; },
+	} );
+	await runtime.setup();
+	const result = runtime.context.actors.configure( runtime.context.actors.resolve( 'militant' ), { closed: true } );
+	assert.equal( result.status, 'completed' ); assert.deepEqual( configured, { closed: true } ); runtime.dispose();
+	const engine = Object.create( ScenarioEngine.prototype ), crowd = { u: { parting: { value: - 1 } } }, group: any = { id: 'speaker' };
+	engine.mission = { crowd, world: {}, city: {} }; engine.configureActor( [ group ], { closed: true, parting: true } );
+	assert.equal( group.closed, true ); assert.equal( crowd.u.parting.value, group.id );
+
+} );
+
 test( 'vehicle spawning validates transport, water-cannon, and static police capabilities', async () => {
 
 	let handles;
@@ -981,6 +1016,89 @@ test( 'BlackBloc, Massacre, Pride and Resni.ca candidates retain their source co
 	assert.deepEqual( [ resnica.id, resnica.city, resnica.objectives[ 0 ].seconds, resnica.resources.water.capacity ], [ 'resnica-rules', 'north', 1500, 10 ] );
 	assert.ok( blackbloc.commands.some( ( command ) => command.id === 'dispersal-order' ) );
 	assert.equal( pride.commands.some( ( command ) => command.id === 'protest-command' ), false );
+
+} );
+
+test( 'Rescue mobile police response is scheduled relative to the Speaker escape', () => {
+
+	const definition = ( rescueScenario as any )( sdkBuilders ), behavior = definition.behaviors[ 0 ].create(), timers = [];
+	const speaker = Object.freeze( { id: 'speaker', kind: 'crowd', run: 1 } );
+	const context = { time: 0, protected: { get: () => ( { actor: speaker } ) },
+		timeline: { after: ( seconds, callback ) => { timers.push( { seconds, callback } ); return { state: 'pending', cancel() {} }; } } };
+	behavior.start( context ); assert.deepEqual( timers.map( ( timer ) => timer.seconds ), [ 2, 14, 45 ] ); timers.length = 0;
+	behavior.onEvent( context, { type: 'player.move', actor: speaker } );
+	assert.deepEqual( timers.map( ( timer ) => timer.seconds ), [ 20, 55, 95, 140 ] );
+
+} );
+
+test( 'Rescue mobile police deploy a road cordon and pursue after the Speaker passes it', async () => {
+
+	const definition = ( rescueScenario as any )( sdkBuilders ), behavior = definition.behaviors[ 0 ].create();
+	const speaker = Object.freeze( { id: 'speaker', kind: 'crowd', run: 1 } ), vehicle = Object.freeze( { id: 'mobile-1', kind: 'vehicle', run: 1 } ), crew = Object.freeze( { id: 'mobile-crew', kind: 'squad', run: 1 } );
+	const timers = [], spawned = [], drives = [], moves = [], commands = [];
+	let speakerPosition = [ - 205, - 178 ], speakerState = 'active', crewState = 'aboard';
+	const rescueCar = { handle: { id: 'rescue-car', kind: 'vehicle', run: 1 }, position: [ - 318, - 772 ], speed: 0, moving: false, revision: 0, crew: null };
+	const context = { time: 0, signal: new AbortController().signal, observation: null as any,
+		protected: { get: () => ( { actor: speaker, state: speakerState, position: speakerPosition } ) },
+		timeline: { after: ( seconds, callback ) => { timers.push( { seconds, callback } ); return { state: 'pending', cancel() {} }; } },
+		presentation: { notice() {}, markers() {} },
+		spawn: { vehicle: ( options ) => { spawned.push( options ); return { settled: Promise.resolve( { status: 'completed', value: vehicle } ) }; } },
+		vehicles: {
+			get: ( handle ) => handle === vehicle ? { handle: vehicle, position: [ - 372, - 385 ], speed: 0, moving: false, revision: crewState === 'aboard' ? 0 : 1,
+				crew: { handle: crew, state: crewState, people: 12, aboard: crewState === 'aboard' ? 12 : 0 } } : rescueCar,
+			drive: ( handle, at, options ) => { drives.push( { handle, at, options } ); return { status: 'completed', value: {} }; },
+			toggleCrew: ( handle, options ) => { crewState = 'deployed'; return { status: 'completed', value: { crew: { handle: crew, state: crewState } } }; },
+		},
+		spatial: { roadSpan: () => ( { a: [ - 12, 0 ], b: [ 12, 0 ], width: 24 } ), roadRoute: ( from, to ) => ( { points: [ from, to ], length: 180 } ),
+			walkable: ( at ) => at, count: () => null },
+		movement: { move: ( actor, at, options ) => { moves.push( { actor, at, options } ); return {}; } },
+		actors: { resolve: () => crew, get: ( handle ) => ( { handle, center: [ - 150, - 300 ], alive: 12 } ) },
+		commands: { execute: ( id, request ) => { commands.push( { id, request } ); return {}; } },
+		resources: { get: () => ( { available: false } ) },
+	};
+	behavior.start( context ); behavior.onEvent( context, { type: 'player.move', actor: speaker } );
+	timers.find( ( timer ) => timer.seconds === 20 ).callback(); await Promise.resolve();
+	assert.deepEqual( spawned[ 0 ], { id: 'mobile-1', at: [ - 372, - 385 ], type: 'police-patrol', crew: 12, selectable: false } );
+	assert.equal( drives.length, 1 );
+	behavior.observe( context, { sequence: 1, elapsed: 1 } );
+	assert.deepEqual( moves[ 0 ], { actor: crew, at: [ 12, 0 ], options: { line: [ - 12, 0 ], radius: 8 } } );
+	speakerPosition = [ - 233, - 402 ];
+	behavior.observe( context, { sequence: 2, elapsed: 1 } );
+	assert.equal( commands[ 0 ].id, 'arrest' ); assert.deepEqual( commands[ 0 ].request.selection, [ crew ] );
+	assert.ok( timers.some( ( timer ) => timer.seconds === 30 ) );
+	context.observation = {}; context.time = 3; behavior.update( context ); assert.equal( commands.length, 2 );
+	speakerState = 'down'; context.time = 6; behavior.update( context ); assert.equal( commands.length, 2 );
+	assert.ok( moves.some( ( move ) => move.at === speakerPosition ) );
+
+} );
+
+test( 'Rescue AntiFa assault targets nearby police and applies sampled injury effects', () => {
+
+	const definition = ( rescueScenario as any )( sdkBuilders ), behavior = definition.behaviors[ 0 ].create();
+	assert.ok( definition.commands.some( ( command ) => command.id === 'antifa-assault' ) );
+	const attacker = Object.freeze( { id: 'antifa-1', kind: 'crowd', run: 1 } ), target = Object.freeze( { id: 'force-0-0', kind: 'squad', run: 1 } );
+	const attackerPerson = Object.freeze( { id: 'antifa-person', run: 1 } ), policePerson = Object.freeze( { id: 'police-person', run: 1 } );
+	const observations = new Map( [ [ attacker.id, { handle: attacker, center: [ 0, 0 ], alive: 24 } ], [ target.id, { handle: target, center: [ 1, 0 ], alive: 24 } ] ] );
+	const moves = [], modes = [], configurations = [], effects = [], opinions = [];
+	const speaker = Object.freeze( { id: 'speaker', kind: 'crowd', run: 1 } ), rescueCar = { position: [ - 318, - 772 ], moving: true, speed: 8 };
+	const context = { time: 5, random: () => 0,
+		protected: { get: () => ( { actor: speaker, state: 'active', position: [ - 205, - 178 ] } ) },
+		vehicles: { get: () => rescueCar },
+		actors: { resolve: ( id ) => observations.get( id )?.handle, get: ( actor ) => observations.get( actor.id ), configure: ( actor, options ) => { configurations.push( [ actor, options ] ); } },
+		movement: { move: ( actor, at, options ) => { moves.push( [ actor, at, options ] ); return { settled: Promise.resolve( { status: 'completed' } ) }; } },
+		crowd: { setMode: ( actor, mode ) => { modes.push( [ actor, mode ] ); return { status: 'completed' }; } },
+		opinion: { adjust: ( delta, reason ) => opinions.push( [ delta, reason ] ) },
+		effects: { apply: ( person, options ) => { effects.push( [ person, options ] ); return { status: 'queued' }; }, nudge: () => ( { status: 'completed' } ) },
+		spatial: { count: () => null }, presentation: { notice() {}, markers() {} }, timeline: { after() {} },
+	};
+	behavior.onEvent( context, { type: 'command.applied', command: 'antifa-assault', selection: [ attacker ], at: [ 1, 0 ], source: 'player' } );
+	behavior.observe( context, { sequence: 5, elapsed: 0.5, people: [
+		{ handle: attackerPerson, actor: attacker, faction: 'protester', position: [ 0, 0 ], status: 'active', agitation: 0.6 },
+		{ handle: policePerson, actor: target, faction: 'police', position: [ 1, 0 ], status: 'active', agitation: 0 },
+	] } );
+	assert.ok( moves.some( ( [ actor ] ) => actor === attacker ) ); assert.deepEqual( modes, [ [ attacker, 'push' ] ] );
+	assert.deepEqual( configurations, [ [ attacker, { speed: 1.7 } ] ] ); assert.deepEqual( opinions, [ [ - 2, 'AntiFa attack the police' ] ] );
+	assert.deepEqual( effects, [ [ policePerson, { status: 'injured', source: 'other', expectedSample: 5 } ] ] );
 
 } );
 

@@ -102,6 +102,8 @@ export interface SpatialContext {
     sample(at: string | Point, options: { radius: number; streetOnly?: boolean }): Point;
     /** Shortest host-measured road span through a point, with wall-to-wall endpoints and width in meters. */
     roadSpan(at: string | Point, maxDistance?: number): RoadSpan;
+    /** Snapped car-accessible road route; null when no route exists. The returned point list is detached and frozen. */
+    roadRoute(from: string | Point, to: string | Point): RoadRoute | null;
     /** Meters from the point to the nearest building or obstacle; null when the map cannot say. */
     clearance(at: string | Point): number | null;
     /** Outer footprint containing the point, copied and frozen; null if no building contains it. */
@@ -115,6 +117,14 @@ export interface RoadSpan {
     readonly a: Point;
     readonly b: Point;
     readonly width: number;
+}
+
+/** Measured car route returned by the host's road graph. */
+export interface RoadRoute {
+    /** Ordered local-meter waypoints from origin to snapped destination. */
+    readonly points: readonly Point[];
+    /** Euclidean length along the returned polyline, in meters. */
+    readonly length: number;
 }
 
 /** Synchronous civilian crowd mutation; implementation details remain inside the host adapter. */
@@ -410,6 +420,8 @@ export interface CommandRequest {
     selection?: readonly ActorHandle[];
     /** Behavior-only gas/water opinion override for source-specific AI policy; maximum absolute delta is 10. */
     opinion?: { delta: number; reason: string };
+    /** Optional arrest radius (5–100 m) or kettle radius (14–100 m); omitted uses the host's default. */
+    radius?: number;
 }
 
 /** Successful application to host simulation, not proof of arrival, an arrest, or an injury. */
@@ -1252,8 +1264,8 @@ export interface ScenarioContext {
         split(actor: ActorHandle | string): { readonly status: 'completed'; readonly value: ActorHandle } | { readonly status: 'rejected'; readonly code: 'TOO_SMALL' | 'PROTECTED_ACTOR' | 'CONTROL_BUSY' };
         /** Merge active civilian actors of one faction; protected/controlled actors reject atomically. */
         merge(actors: readonly (ActorHandle | string)[]): { readonly status: 'completed'; readonly value: ActorHandle } | { readonly status: 'rejected'; readonly code: 'PROTECTED_ACTOR' | 'CONTROL_BUSY' | 'FACTION' | 'TOO_SMALL' };
-        /** Validated semantic state changes on a population actor; speed is zero to four. */
-        configure(actor: ActorHandle | string, options: { speed?: number; masked?: boolean; identified?: boolean; parting?: boolean; home?: boolean }): { readonly status: 'completed' };
+        /** Validated semantic state changes on a population actor; closed groups do not join or leave through sympathy sway. */
+        configure(actor: ActorHandle | string, options: { speed?: number; masked?: boolean; identified?: boolean; parting?: boolean; home?: boolean; closed?: boolean }): { readonly status: 'completed' };
         /** Convert sampled active bystanders into protesters atomically in host membership. */
         recruit(actor: ActorHandle | string): { readonly status: 'completed'; readonly people: number } | { readonly status: 'rejected'; readonly code: string };
         /** Return null before valid sample data exists; invalid/foreign handles throw. */
