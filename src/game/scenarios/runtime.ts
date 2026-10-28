@@ -145,6 +145,7 @@ export class ScenarioRuntime {
 			crowd: Object.freeze( {
 				setMode: ( actor, mode ) => this.setCrowdMode( actor, mode ),
 				nudge: ( actor, options ) => this.nudgeCrowd( actor, options ),
+				recall: ( actor, floor ) => this.recallCrowd( actor, floor ),
 				setMorale: ( actor, morale ) => this.setCrowdMorale( actor, morale ),
 			} ),
 			commands: this.commands.context(),
@@ -253,8 +254,8 @@ export class ScenarioRuntime {
 
 	configureActor( value, options ) {
 
-		this.writable(); fields( options, [ 'speed', 'masked', 'identified', 'parting', 'home', 'closed' ], 'actors.configure' );
-		for ( const key of [ 'masked', 'identified', 'parting', 'home', 'closed' ] ) check( options[ key ] === undefined || typeof options[ key ] === 'boolean', `actors.${key}`, 'must be boolean' );
+		this.writable(); fields( options, [ 'speed', 'masked', 'identified', 'parting', 'home', 'closed', 'leaderSuccession' ], 'actors.configure' );
+		for ( const key of [ 'masked', 'identified', 'parting', 'home', 'closed', 'leaderSuccession' ] ) check( options[ key ] === undefined || typeof options[ key ] === 'boolean', `actors.${key}`, 'must be boolean' );
 		check( options.speed === undefined || Number.isFinite( options.speed ) && options.speed >= 0 && options.speed <= 4, 'actors.speed', 'must be from zero to four' );
 		const handle = typeof value === 'string' ? this.context.actors.resolve( value ) : value; this.actor( handle );
 		check( handle.kind !== 'vehicle', 'actors.configure', 'requires a population actor' );
@@ -407,6 +408,16 @@ export class ScenarioRuntime {
 		if ( result.status === 'rejected' ) return Object.freeze( result );
 		this.event( 'crowd.nudged', { actor: actor.handle, people: result.people, agitation, resolve } );
 		return Object.freeze( { status: 'completed', value: Object.freeze( { actor: actor.handle, people: result.people } ) } );
+
+	}
+	recallCrowd( value, floor ) {
+
+		this.writable();
+		check( Number.isFinite( floor ) && floor >= 0 && floor <= 2, 'crowd.recall.floor', 'must be from zero to two' );
+		const actor = this.crowdRecord( value ), result = this.adapter.recallCrowd( actor.backend, floor );
+		if ( result.status === 'rejected' ) return Object.freeze( result );
+		this.event( 'crowd.recalled', { actor: actor.handle, people: result.people, resolve: floor } );
+		return Object.freeze( { status: 'completed', value: Object.freeze( { actor: actor.handle, people: result.people, resolve: floor } ) } );
 
 	}
 
@@ -657,13 +668,13 @@ export class ScenarioRuntime {
 
 		const record = this.actors.get( handle.id );
 		if ( record?.handle !== handle ) return;
-		this.commands.claims.get( handle )?.cancel( 'actor removed' );
+		this.commands.cancelActor( handle, 'actor removed' );
 		if ( record.crewHandle ) {
 
 			const crew = this.actors.get( record.crewHandle.id );
 			if ( crew ) {
 
-				this.commands.claims.get( crew.handle )?.cancel( 'vehicle removed' );
+				this.commands.cancelActor( crew.handle, 'vehicle removed' );
 				const crewMovement = this.movement.orders.get( crew.handle.id );
 				if ( crewMovement ) this.movement.remove( crewMovement, 'vehicle removed' );
 				this.identity.releaseActor( crew.handle );

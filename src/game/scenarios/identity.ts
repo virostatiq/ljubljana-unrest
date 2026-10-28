@@ -71,7 +71,7 @@ export class IdentityHost {
 
 	}
 
-	transferPerson( handle, options ) {
+	transferPerson( handle, options, recoveryEntity = null ) {
 
 		this.runtime.writable();
 		fields( options, [ 'to', 'expectedRevision', 'expectedSample', 'promote' ], 'people.transfer' );
@@ -93,7 +93,12 @@ export class IdentityHost {
 		if ( person.actor === targetHandle ) return reject( 'ALREADY_MEMBER' );
 		const attached = [ ...this.entities.values() ].filter( ( entity ) => entity.carrier === handle );
 		if ( attached.some( ( entity ) => entity.rules && ! entity.rules.friendly.includes( targetHandle.id ) ) ) return reject( 'PROTECTED_TARGET' );
-		for ( const entity of this.entities.values() ) if ( entity.actor === targetHandle && ! attached.includes( entity ) ) return reject( 'PROTECTED_TARGET' );
+		for ( const entity of this.entities.values() ) {
+
+			const protectedActor = entity.actor ?? ( entity.rules && entity.subject ? this.people.get( entity.subject.id )?.actor : null );
+			if ( protectedActor === targetHandle && ! attached.includes( entity ) && entity !== recoveryEntity ) return reject( 'PROTECTED_TARGET' );
+
+		}
 		const result = this.runtime.adapter.transferPerson( person.backend, target.backend, {
 			promote: options.promote === true, sample: this.runtime.lastSample,
 		} );
@@ -251,7 +256,8 @@ export class IdentityHost {
 				if ( [ 'active', 'down', 'carried' ].includes( entity.state ) ) {
 
 					const people = [ ...this.people.values() ].filter( ( person ) => person.sample ).map( ( person ) => person.sample );
-					entity.capture = captureState( entity, entity.rules, people, this.availableActors, transition ? 0 : elapsed );
+					const shielded = ! ( entity.state === 'down' ) && this.runtime.adapter.protectedShielded?.( entity.actor ) === true;
+					entity.capture = captureState( entity, entity.rules, people, this.availableActors, transition ? 0 : elapsed, shielded );
 					if ( entity.capture.available && entity.capture.held >= entity.capture.required ) events.push( this.transitionPerson( entity, 'captured', 'hostile pressure' ) );
 
 				}
@@ -291,8 +297,15 @@ export class IdentityHost {
 	transfer( entityHandle, options ) {
 
 		this.runtime.writable();
-		fields( options, [ 'carrier', 'expectedRevision', 'expectedSample', 'promote', 'radius' ], 'protected.transfer' );
+		fields( options, [ 'carrier', 'expectedRevision', 'expectedSample', 'promote', 'radius', 'joinGroup' ], 'protected.transfer' );
 		const entity = this.entityRecord( entityHandle ), person = this.personRecord( options.carrier );
+		if ( options.joinGroup !== undefined ) {
+
+			fields( options.joinGroup, [ 'speed' ], 'protected.transfer.joinGroup' );
+			check( Number.isFinite( options.joinGroup.speed ) && options.joinGroup.speed >= 0 && options.joinGroup.speed <= 4,
+				'protected.transfer.joinGroup.speed', 'must be from zero to four' );
+
+		}
 		check( Number.isInteger( options.expectedRevision ) && options.expectedRevision >= 0, 'protected.expectedRevision', 'must be a non-negative revision' );
 		check( Number.isInteger( options.expectedSample ) && options.expectedSample > 0, 'protected.expectedSample', 'must identify an observation' );
 		check( options.promote === undefined || typeof options.promote === 'boolean', 'protected.promote', 'must be a boolean' );
@@ -318,8 +331,27 @@ export class IdentityHost {
 
 		}
 		for ( const other of this.entities.values() ) if ( other !== entity && ( other.carrier === person.handle || other.actor === person.sample.actor ) ) return Object.freeze( { status: 'rejected', code: 'CARRIER_BUSY' } );
-		if ( options.promote ) this.runtime.adapter.promoteLeader( person.backend, person.sample.position );
-		entity.carrier = person.handle; entity.actor = person.sample.actor; entity.position = person.sample.position;
+		let joinedGroup = false;
+		if ( options.joinGroup !== undefined ) {
+
+			if ( ! entity.rules || entity.state !== 'down' || ! entity.subject ) return Object.freeze( { status: 'rejected', code: 'NOT_DOWN' } );
+			const subject = this.people.get( entity.subject.id ), targetActor = subject?.actor, target = targetActor && this.runtime.actors.get( targetActor.id );
+			if ( ! target || target.handle !== targetActor || target.backend === null || targetActor.kind === 'vehicle'
+				|| ! entity.rules.friendly.includes( targetActor.id ) ) return Object.freeze( { status: 'rejected', code: 'PROTECTED_TARGET' } );
+			if ( person.actor !== targetActor ) {
+
+				const joined = this.transferPerson( person.handle, { to: targetActor, expectedRevision: person.revision ?? 0,
+					expectedSample: options.expectedSample, promote: options.promote === true }, entity );
+				if ( joined.status !== 'completed' ) return Object.freeze( joined );
+
+			} else if ( options.promote ) this.runtime.adapter.promoteLeader( person.backend, person.sample.position );
+			check( typeof this.runtime.adapter.configureActor === 'function', 'protected.transfer.joinGroup', 'host does not support group configuration' );
+			this.runtime.adapter.configureActor( target.backend, { speed: options.joinGroup.speed } );
+			joinedGroup = true;
+
+		}
+		if ( options.promote && ! joinedGroup && options.joinGroup === undefined ) this.runtime.adapter.promoteLeader( person.backend, person.sample.position );
+		entity.carrier = person.handle; entity.actor = person.actor; entity.position = person.sample.position;
 		entity.state = 'carried'; entity.revision ++;
 		if ( entity.rules ) entity.capture = Object.freeze( { ...entity.capture, held: 0, required: entity.rules.seconds } );
 		this.refresh();

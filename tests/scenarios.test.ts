@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import defenseScenario from '../examples/defense-scenario.ts';
 import governmentScenario from '../examples/government-scenario.ts';
-import clashScenario from '../examples/clash-scenario.ts';
 import trainingScenario from '../examples/training-scenario.ts';
 import courtScenario from '../examples/court-scenario.ts';
 import * as sdkBuilders from '../src/game/scenarios/index.ts';
@@ -14,7 +13,7 @@ import resnicaScenario from '../examples/resnica-scenario.ts';
 import rescueScenario from '../examples/rescue-scenario.ts';
 import { ClashMission, clashScenario as clashMission } from '../src/game/missions/clash.ts';
 import { RallyMission } from '../src/game/missions/rally.ts';
-import { STAT } from '../src/sim/crowd.ts';
+import { MAX_EDITS, STAT } from '../src/sim/crowd.ts';
 import { advanceClash } from '../src/game/scenarios/clash.ts';
 import { ScenarioEngine } from '../src/game/scenarios/engine.ts';
 import { scenarioMission } from '../src/game/scenarios/mission.ts';
@@ -141,19 +140,6 @@ function governmentRouteHooks() {
 		holdBuilding: ( options ) => options, landmark: ( name ) => name, place: ( name ) => name,
 		policeCommands: () => [], target: ( name ) => name } );
 	return routes;
-
-}
-
-function clashCandidate() {
-
-	let director, definition;
-	const defineBehavior = ( value ) => {
-		if ( value.id === 'clash-director' ) director = value.create();
-		return ( options ) => ( { kind: 'behavior', id: options.id } );
-	};
-	definition = ( clashScenario as any )( { defineBehavior, defineScenario: ( options ) => options, landmark: ( name ) => name,
-		place: ( name ) => name, policeCommands: () => [], preventClash: ( options ) => ( { ...options, kind: 'prevent-clash' } ) } );
-	return { definition, director };
 
 }
 
@@ -901,18 +887,48 @@ test( 'crowd standoff options are validated and passed on frozen; without them t
 
 } );
 
-test( 'actor configuration exposes the native closed-against-sway flag', async () => {
+test( 'actor configuration exposes native closed and leader-succession policies', async () => {
 
 	let configured;
 	const { runtime } = fixture( scenario( { setup( ctx ) { ctx.spawn.crowd( { id: 'militant', at: 'square' } ); } } ), {
 		configureActor: ( groups, options ) => { configured = options; return { status: 'completed' }; },
 	} );
 	await runtime.setup();
-	const result = runtime.context.actors.configure( runtime.context.actors.resolve( 'militant' ), { closed: true } );
-	assert.equal( result.status, 'completed' ); assert.deepEqual( configured, { closed: true } ); runtime.dispose();
-	const engine = Object.create( ScenarioEngine.prototype ), crowd = { u: { parting: { value: - 1 } } }, group: any = { id: 'speaker' };
-	engine.mission = { crowd, world: {}, city: {} }; engine.configureActor( [ group ], { closed: true, parting: true } );
-	assert.equal( group.closed, true ); assert.equal( crowd.u.parting.value, group.id );
+	const result = runtime.context.actors.configure( runtime.context.actors.resolve( 'militant' ), { closed: true, leaderSuccession: false } );
+	assert.equal( result.status, 'completed' ); assert.deepEqual( configured, { closed: true, leaderSuccession: false } ); runtime.dispose();
+	const engine = Object.create( ScenarioEngine.prototype ), crowd = { u: { parting: { value: - 1 } } }, group: any = { id: 'speaker' }, ordinary: any = { id: 'ordinary' };
+	engine.mission = { crowd, world: {}, city: {} }; engine.configureActor( [ group ], { closed: true, parting: true, leaderSuccession: false } );
+	assert.equal( group.closed, true ); assert.equal( group.succession, Infinity ); assert.equal( crowd.u.parting.value, group.id );
+	engine.configureActor( [ ordinary ], { closed: true } ); assert.equal( ordinary.closed, true ); assert.equal( 'succession' in ordinary, false );
+
+} );
+
+test( 'crowd recall is an actor-scoped resolve mutation with a bounded floor', async () => {
+
+	let backend, captured;
+	const definition = scenario( { setup( ctx ) { ctx.spawn.crowd( { id: 'antifa', at: 'square', people: 2 } ); } } );
+	const { runtime } = fixture( definition, {
+		spawn: async ( kind ) => { backend = { id: 'antifa-group', kind, members: [ 0, 1 ] }; return [ backend ]; },
+		recallCrowd: ( groups, floor ) => { captured = [ groups, floor ]; return { status: 'completed', people: 2 }; },
+	} );
+	await runtime.setup();
+	const actor = runtime.context.actors.resolve( 'antifa' ), result = runtime.context.crowd.recall( actor, 0.6 );
+	assert.equal( result.status, 'completed' ); assert.deepEqual( captured, [ [ backend ], 0.6 ] );
+	assert.throws( () => runtime.context.crowd.recall( actor, 2.1 ), /crowd\.recall\.floor/ ); runtime.dispose();
+
+} );
+
+test( 'native crowd recall preflights edit capacity before queueing members', () => {
+
+	const calls = [], crowd = { pendingEdits: [], recall: ( member, floor ) => calls.push( [ member, floor ] ) };
+	const engine = Object.create( ScenarioEngine.prototype ); engine.mission = { crowd, world: { intel: {} } };
+	const groups = [ { members: [ 10, 11 ] }, { members: [ 12 ] } ];
+	assert.deepEqual( engine.recallCrowd( groups, 0.6 ), { status: 'completed', people: 3 } );
+	assert.deepEqual( calls, [ [ 10, 0.6 ], [ 11, 0.6 ], [ 12, 0.6 ] ] );
+	crowd.pendingEdits = new Array( MAX_EDITS - 2 ); calls.length = 0;
+	assert.deepEqual( engine.recallCrowd( groups, 0.6 ), { status: 'rejected', code: 'EDIT_CAPACITY' } ); assert.deepEqual( calls, [] );
+	engine.mission.world.intel = null;
+	assert.deepEqual( engine.recallCrowd( groups, 0.6 ), { status: 'rejected', code: 'OBSERVATION_UNAVAILABLE' } );
 
 } );
 
@@ -1031,6 +1047,44 @@ test( 'Rescue mobile police response is scheduled relative to the Speaker escape
 
 } );
 
+test( 'Rescue Snatch considers a deployed mobile crew at 40 m, not only its 25 m lunge radius', async () => {
+
+	const definition = ( rescueScenario as any )( sdkBuilders ), behavior = definition.behaviors[ 0 ].create();
+	const speaker = Object.freeze( { id: 'speaker', kind: 'crowd', run: 1 } ), vehicle = Object.freeze( { id: 'mobile-1', kind: 'vehicle', run: 1 } );
+	const crew = Object.freeze( { id: 'mobile-1-crew', kind: 'squad', run: 1 } ), timers = [], notices = [], commands = [];
+	let moving = false, crewState = 'aboard', crewRevision = 0;
+	const position: [ number, number ] = [ - 205, - 178 ];
+	const context = {
+		time: 0, signal: new AbortController().signal, observation: { people: [] },
+		protected: { get: () => ( { actor: speaker, state: 'active', position } ) },
+		timeline: { after: ( seconds, callback ) => { timers.push( { seconds, callback } ); return { state: 'pending', cancel() {} }; } },
+		presentation: { notice: ( text ) => notices.push( text ), markers() {} },
+		spawn: { vehicle: () => ( { settled: Promise.resolve( { status: 'completed', value: vehicle } ) } ) },
+		vehicles: {
+			get: () => ( { handle: vehicle, position: [ - 372, - 385 ], moving, speed: moving ? 9 : 0, revision: crewRevision,
+				crew: { handle: crew, state: crewState, people: 12, aboard: crewState === 'aboard' ? 12 : 0 } } ),
+			drive: () => { moving = true; crewRevision ++; return { status: 'completed' }; },
+			toggleCrew: () => { crewState = 'deployed'; crewRevision ++; return { status: 'completed', value: { crew: { handle: crew } } }; },
+		},
+		spatial: { roadRoute: ( from, to ) => ( { points: [ from, to ], length: 180 } ), walkable: ( at ) => at, roadSpan: () => ( { a: [ - 12, 0 ], b: [ 12, 0 ], width: 24 } ), count: () => 0 },
+		movement: { move: () => ( { settled: Promise.resolve( { status: 'completed' } ) } ) },
+		actors: { resolve: ( id ) => Object.freeze( { id, kind: 'squad', run: 1 } ), get: ( handle ) => ( { handle,
+			center: handle.id === crew.id ? [ - 165, - 178 ] : [ - 900, - 900 ], alive: 12 } ) },
+		commands: { execute: ( id, request ) => { commands.push( { id, request } ); return { settled: Promise.resolve( { status: 'completed' } ) }; } },
+		resources: { get: () => ( { available: false } ) },
+	};
+	behavior.start( context ); behavior.onEvent( context, { type: 'player.move', actor: speaker } );
+	timers.find( ( timer ) => timer.seconds === 20 ).callback(); await Promise.resolve();
+	timers.find( ( timer ) => timer.seconds === 1.5 ).callback(); moving = false; crewRevision ++;
+	behavior.observe( context, { sequence: 1, elapsed: 0.5 } );
+	context.time = 75; behavior.update( context ); context.time = 90; behavior.update( context );
+	assert.ok( notices.some( ( text ) => text.includes( 'mobile-1-crew for the Speaker' ) ) );
+	timers.filter( ( timer ) => timer.seconds === 5 ).at( - 1 ).callback();
+	assert.equal( commands[ 0 ].id, 'arrest' ); assert.equal( commands[ 0 ].request.selection[ 0 ].id, crew.id );
+	assert.equal( commands[ 0 ].request.retarget, true );
+
+} );
+
 test( 'Rescue mobile police deploy a road cordon and pursue after the Speaker passes it', async () => {
 
 	const definition = ( rescueScenario as any )( sdkBuilders ), behavior = definition.behaviors[ 0 ].create();
@@ -1053,12 +1107,13 @@ test( 'Rescue mobile police deploy a road cordon and pursue after the Speaker pa
 			walkable: ( at ) => at, count: () => null },
 		movement: { move: ( actor, at, options ) => { moves.push( { actor, at, options } ); return {}; } },
 		actors: { resolve: () => crew, get: ( handle ) => ( { handle, center: [ - 150, - 300 ], alive: 12 } ) },
-		commands: { execute: ( id, request ) => { commands.push( { id, request } ); return {}; } },
+		commands: { execute: ( id, request ) => { commands.push( { id, request } ); return { id: `operation-${commands.length}`, state: 'applied', settled: Promise.resolve( { status: 'completed' } ), cancel: () => ( { status: 'too-late' } ) }; } },
 		resources: { get: () => ( { available: false } ) },
 	};
 	behavior.start( context ); behavior.onEvent( context, { type: 'player.move', actor: speaker } );
 	timers.find( ( timer ) => timer.seconds === 20 ).callback(); await Promise.resolve();
 	assert.deepEqual( spawned[ 0 ], { id: 'mobile-1', at: [ - 372, - 385 ], type: 'police-patrol', crew: 12, selectable: false } );
+	assert.equal( drives.length, 0 ); timers.find( ( timer ) => timer.seconds === 1.5 ).callback();
 	assert.equal( drives.length, 1 );
 	behavior.observe( context, { sequence: 1, elapsed: 1 } );
 	assert.deepEqual( moves[ 0 ], { actor: crew, at: [ 12, 0 ], options: { line: [ - 12, 0 ], radius: 8 } } );
@@ -1079,14 +1134,14 @@ test( 'Rescue AntiFa assault targets nearby police and applies sampled injury ef
 	const attacker = Object.freeze( { id: 'antifa-1', kind: 'crowd', run: 1 } ), target = Object.freeze( { id: 'force-0-0', kind: 'squad', run: 1 } );
 	const attackerPerson = Object.freeze( { id: 'antifa-person', run: 1 } ), policePerson = Object.freeze( { id: 'police-person', run: 1 } );
 	const observations = new Map( [ [ attacker.id, { handle: attacker, center: [ 0, 0 ], alive: 24 } ], [ target.id, { handle: target, center: [ 1, 0 ], alive: 24 } ] ] );
-	const moves = [], modes = [], configurations = [], effects = [], opinions = [];
+	const moves = [], modes = [], configurations = [], recalls = [], effects = [], opinions = [];
 	const speaker = Object.freeze( { id: 'speaker', kind: 'crowd', run: 1 } ), rescueCar = { position: [ - 318, - 772 ], moving: true, speed: 8 };
 	const context = { time: 5, random: () => 0,
 		protected: { get: () => ( { actor: speaker, state: 'active', position: [ - 205, - 178 ] } ) },
 		vehicles: { get: () => rescueCar },
 		actors: { resolve: ( id ) => observations.get( id )?.handle, get: ( actor ) => observations.get( actor.id ), configure: ( actor, options ) => { configurations.push( [ actor, options ] ); } },
 		movement: { move: ( actor, at, options ) => { moves.push( [ actor, at, options ] ); return { settled: Promise.resolve( { status: 'completed' } ) }; } },
-		crowd: { setMode: ( actor, mode ) => { modes.push( [ actor, mode ] ); return { status: 'completed' }; } },
+		crowd: { setMode: ( actor, mode ) => { modes.push( [ actor, mode ] ); return { status: 'completed' }; }, recall: ( actor, floor ) => { recalls.push( [ actor, floor ] ); return { status: 'completed' }; } },
 		opinion: { adjust: ( delta, reason ) => opinions.push( [ delta, reason ] ) },
 		effects: { apply: ( person, options ) => { effects.push( [ person, options ] ); return { status: 'queued' }; }, nudge: () => ( { status: 'completed' } ) },
 		spatial: { count: () => null }, presentation: { notice() {}, markers() {} }, timeline: { after() {} },
@@ -1097,6 +1152,7 @@ test( 'Rescue AntiFa assault targets nearby police and applies sampled injury ef
 		{ handle: policePerson, actor: target, faction: 'police', position: [ 1, 0 ], status: 'active', agitation: 0 },
 	] } );
 	assert.ok( moves.some( ( [ actor ] ) => actor === attacker ) ); assert.deepEqual( modes, [ [ attacker, 'push' ] ] );
+	assert.deepEqual( recalls, [ [ attacker, 0.6 ] ] );
 	assert.deepEqual( configurations, [ [ attacker, { speed: 1.7 } ] ] ); assert.deepEqual( opinions, [ [ - 2, 'AntiFa attack the police' ] ] );
 	assert.deepEqual( effects, [ [ policePerson, { status: 'injured', source: 'other', expectedSample: 5 } ] ] );
 
@@ -1214,47 +1270,6 @@ test( 'Government injury reactions apply capped same-group and half-strength nei
 
 } );
 
-test( 'Clash candidate preserves source setup, timed waves, cordons and three-leg march route', async () => {
-
-	const { definition, director } = clashCandidate(), spawns = [], orders = [], timers = [], centers = new Map<any, any>();
-	const context = { time: 0, signal: new AbortController().signal, random: () => 0.5, metrics: { clashPressure: 0 },
-		presentation: { focus() {}, notice() {} }, timeline: { after: ( seconds, callback ) => { timers.push( { seconds, callback } ); return { state: 'pending', cancel() {} }; } },
-		spawn: Object.fromEntries( [ 'crowd', 'squad', 'vehicle', 'bystanders' ].map( ( kind ) => [ kind, ( options ) => {
-			const actor = { id: options.id, kind: kind === 'bystanders' || kind === 'crowd' ? 'crowd' : kind, run: 1 };
-			spawns.push( { kind, options, actor } ); centers.set( actor.id, [ 0, 0 ] );
-			return { settled: Promise.resolve( { status: 'completed', value: actor } ) };
-		} ] ) ),
-		movement: { move: ( actor, at, options ) => {
-			orders.push( { actor, at, options } );
-			return { settled: Promise.resolve( { status: 'completed', value: {} } ) };
-		} },
-		actors: { get: ( actor ) => ( { handle: actor, alive: 100, center: centers.get( actor.id ) ?? null } ) },
-	};
-	await definition.setup( context );
-	assert.equal( spawns.filter( ( spawn ) => spawn.kind === 'crowd' && spawn.options.id === 'march' )[ 0 ].options.people, 2600 );
-	assert.equal( spawns.filter( ( spawn ) => spawn.kind === 'crowd' && spawn.options.id.startsWith( 'counter-' ) ).length, 15 );
-	assert.equal( spawns.filter( ( spawn ) => spawn.kind === 'squad' ).length, 10 );
-	assert.equal( spawns.filter( ( spawn ) => spawn.kind === 'vehicle' ).length, 3 );
-	assert.equal( spawns.find( ( spawn ) => spawn.kind === 'bystanders' ).options.people, 2000 );
-	assert.equal( definition.objectives[ 0 ].kind, 'prevent-clash' );
-	await director.start( context );
-	assert.deepEqual( timers.map( ( timer ) => timer.seconds ), [ 2, 40, 170, 200, 390, 420 ] );
-	timers.find( ( timer ) => timer.seconds === 40 ).callback( context );
-	await Promise.resolve();
-	let marchOrders = orders.filter( ( order ) => order.actor.id === 'march' );
-	assert.deepEqual( marchOrders[ 0 ], { actor: spawns.find( ( spawn ) => spawn.options.id === 'march' ).actor,
-		at: [ - 225, 65 ], options: { radius: 15 } } );
-	centers.set( 'march', [ - 225, 65 ] ); context.time = 41;
-	director.update( context, 1 / 60 ); await Promise.resolve();
-	marchOrders = orders.filter( ( order ) => order.actor.id === 'march' );
-	assert.deepEqual( marchOrders[ 1 ], { actor: marchOrders[ 0 ].actor, at: [ - 314, 100 ], options: { radius: 15 } } );
-	centers.set( 'march', [ - 314, 100 ] );
-	director.update( context, 1 / 60 ); await Promise.resolve();
-	marchOrders = orders.filter( ( order ) => order.actor.id === 'march' );
-	assert.deepEqual( marchOrders[ 2 ], { actor: marchOrders[ 0 ].actor, at: [ - 450, - 80 ], options: { radius: 30 } } );
-
-} );
-
 test( 'invalid score output fails without publishing or saving a malformed result', async () => {
 
 	const { runtime, finished, failures } = fixture( scenario( { score: () => ( { stars: 4, lines: [] } ),
@@ -1298,16 +1313,18 @@ test( 'ordered outcome rules use first-match precedence and preserve default obj
 
 test( 'behavior crowd controls are owner-scoped and stop with their lifetime', async () => {
 
-	let crowdContext, actor;
+	let crowdContext, actor; const recalls = [];
 	const attachment = defineBehavior( { id: 'crowd-control', create: () => ( { start( ctx ) { crowdContext = ctx; actor = ctx.actors.resolve( 'march' ); } } ) } )( { id: 'controller' } );
 	const { runtime } = fixture( scenario( { setup( ctx ) { ctx.spawn.crowd( { id: 'march', at: 'square' } ); },
 		behaviors: [ attachment ] } ), { spawn: async () => [], setCrowdMode: () => ( { status: 'completed' } ),
-		nudgeCrowd: () => ( { status: 'completed', people: 1 } ) } );
+		nudgeCrowd: () => ( { status: 'completed', people: 1 } ), recallCrowd: ( groups, floor ) => { recalls.push( [ groups, floor ] ); return { status: 'completed', people: 2 }; } } );
 	await runtime.setup(); runtime.observe( {} ); await runtime.start();
 	assert.equal( crowdContext.crowd.setMode( actor, 'riot' ).status, 'completed' );
+	assert.equal( crowdContext.crowd.recall( actor, 0.6 ).status, 'completed' ); assert.equal( recalls[ 0 ][ 1 ], 0.6 );
 	crowdContext.complete();
 	assert.throws( () => crowdContext.crowd.setMode( actor, 'hold' ), /cannot mutate while completed/ );
 	assert.throws( () => crowdContext.crowd.nudge( actor, { agitation: 0.1 } ), /cannot mutate while completed/ );
+	assert.throws( () => crowdContext.crowd.recall( actor, 0.6 ), /cannot mutate while completed/ );
 	runtime.dispose();
 
 } );

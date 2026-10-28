@@ -97,6 +97,7 @@ export class ScenarioEngine {
 
 			if ( options.speed !== undefined ) this.mission.crowd.setGroup( group.id, { speed: options.speed } );
 			for ( const key of [ 'masked', 'identified', 'closed' ] ) if ( options[ key ] !== undefined ) group[ key ] = options[ key ];
+			if ( options.leaderSuccession !== undefined ) group.succession = options.leaderSuccession ? null : Infinity;
 			if ( options.parting === true ) this.mission.crowd.u.parting.value = group.id;
 			if ( options.parting === false && this.mission.crowd.u.parting.value === group.id ) this.mission.crowd.u.parting.value = - 1;
 			if ( options.home === true && ! group.home ) Mission.prototype.sendHome.call( this.mission, group );
@@ -259,6 +260,15 @@ export class ScenarioEngine {
 		if ( groups.some( ( group ) => ! [ FACTION.PROTESTER, FACTION.BYSTANDER, FACTION.COUNTER ].includes( group.faction ) ) ) return { status: 'rejected', code: 'FACTION' };
 		for ( const group of groups ) this.mission.crowd.setGroup( group.id, { morale } );
 		return { status: 'completed' };
+
+	}
+	recallCrowd( groups, floor ) {
+
+		const { crowd, world } = this.mission, members = groups.flatMap( ( group ) => group.members );
+		if ( ! world.intel ) return { status: 'rejected', code: 'OBSERVATION_UNAVAILABLE' };
+		if ( crowd.pendingEdits.length + members.length > MAX_EDITS ) return { status: 'rejected', code: 'EDIT_CAPACITY' };
+		for ( const member of members ) crowd.recall( member, floor );
+		return { status: 'completed', people: members.length };
 
 	}
 
@@ -456,6 +466,12 @@ export class ScenarioEngine {
 		}
 
 		return { alive, center: alive ? [ sumX / alive, sumY / alive ] : null };
+
+	}
+	protectedShielded( handle ) {
+
+		const record = this.mission.runtime?.actors.get( handle?.id );
+		return record?.handle === handle && Array.isArray( record.backend ) && record.backend.some( ( group ) => group.mode === MODE.SHIELD );
 
 	}
 
@@ -939,8 +955,9 @@ export class ScenarioEngine {
 		} else if ( request.id === 'charge' ) work = world.charge( groups, ...request.at, { layer: prepared.layer, valid: current } );
 		else if ( request.id === 'arrest' && prepared.custody ) runtime.custody.start( groups, request.at );
 		else if ( request.id === 'arrest' ) work = world.arrest( groups, ...request.at, request.radius ?? 5,
-			request.radius === undefined ? null : request.at, { layer: prepared.layer, valid: current } );
-		else if ( request.id === 'kettle' ) work = world.kettle( groups, ...request.at, prepared.radius, world.intel.pos, { layer: prepared.layer, valid: current } );
+			request.aim ?? ( request.radius === undefined ? null : request.at ), { layer: prepared.layer, valid: current } );
+		else if ( request.id === 'kettle' ) work = world.kettle( groups, ...request.at, prepared.radius, world.intel.pos,
+			{ layer: prepared.layer, valid: current, tighten: request.tighten } );
 		else if ( request.id === 'reinforce' ) work = world.moveSquads( groups, ...request.at, { layer: prepared.layer, valid: current } );
 		if ( work ) work.catch( ( error ) => runtime.fail( error ) );
 		prepared.applied = true;

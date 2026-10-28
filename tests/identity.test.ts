@@ -49,6 +49,37 @@ test( 'protected identity survives dropping and recovery by a person in another 
 
 } );
 
+test( 'downed protected recovery rejoins the bearer to the original actor at the requested speed', () => {
+
+	const { host, banner, first, second, members, runtime } = fixture( { kind: 'person', protection: {
+		friendly: [ 'escort', 'relief' ], hostile: [ 'pursuers' ], recoveryMinimum: 1,
+	} } );
+	const before = host.get( banner ), carrier = host.members( second )[ 0].handle;
+	members.get( first )[ 0 ].status = 'injured';
+	runtime.observation = { sequence: 2 }; ( runtime as any ).step = 2;
+	host.collect( {}, { step: 2 } ); host.reconcile( { elapsed: 1 } );
+	const down = host.get( banner ); let transferTarget, configured;
+	assert.equal( down.state, 'down' );
+	( runtime.adapter as any ).transferPerson = ( backend, target ) => {
+
+		transferTarget = target;
+		const source = members.get( second ), index = source.findIndex( ( member ) => member.backend === backend ), [ moved ] = source.splice( index, 1 );
+		for ( const member of members.get( first ) ) member.leader = false;
+		members.get( first ).push( { ...moved, leader: true } );
+		return { status: 'completed', backend: { ...backend, group: target } };
+
+	};
+	( runtime.adapter as any ).configureActor = ( backend, options ) => { configured = [ backend, options ]; };
+	const generic = host.transferPerson( carrier, { to: first, expectedRevision: 0, expectedSample: 2 } );
+	assert.equal( ( generic as any ).code, 'PROTECTED_TARGET' );
+	const result = host.transfer( banner, { carrier, expectedRevision: down.revision, expectedSample: 2, joinGroup: { speed: 0.85 } } );
+	assert.equal( result.status, 'completed', JSON.stringify( result ) );
+	assert.equal( transferTarget, first ); assert.deepEqual( configured, [ first, { speed: 0.85 } ] );
+	assert.equal( result.value.actor, first ); assert.equal( result.value.carrier, carrier );
+	assert.equal( members.get( second ).length, 1 ); assert.equal( members.get( first ).length, 2 );
+
+} );
+
 test( 'stale requests and duplicate transfers do not promote or change relationships', () => {
 
 	const { host, banner, second, runtime, promoted } = fixture();

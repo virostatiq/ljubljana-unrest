@@ -13,6 +13,7 @@ const FORCES: { name: string; at: Sdk.Point }[] = [ { name: 'Slovenska', at: [ -
 const MOBILE_ORIGINS = { Slovenska: [ - 372, - 385 ], Barjanska: [ - 515, - 1300 ] };
 const MOBILE_RESPONSE = [ [ 20, 'Slovenska', 'ahead' ], [ 55, 'Barjanska', 'car' ], [ 95, 'Slovenska', 'ahead' ], [ 140, 'Barjanska', 'ahead' ] ] as const;
 const distance = ( first, second ) => Math.hypot( first[ 0 ] - second[ 0 ], first[ 1 ] - second[ 1 ] );
+const grid12 = ( [ x, y ]: Sdk.Point ): Sdk.Point => [ Math.round( x / 12 ) * 12, Math.round( y / 12 ) * 12 ];
 const protestCluster = ( ctx ) => {
 
 	const people = ( ctx.observation?.people ?? [] ).filter( ( person ) => person.faction === 'protester' && person.status === 'active' && distance( person.position, STAND ) <= 70 );
@@ -32,7 +33,7 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 	const friendly = [ 'speaker', 'stewards', 'listeners', 'antifa-1', 'antifa-2', 'antifa-3', 'medics' ];
 	const behavior = defineBehavior( { id: 'rescue-escape-and-police', create() {
 
-		let routeOperation, routeDestination, detouring = false, lastPolice = 0, lastSnatch = - 99, lastGas = - 99, lastDown = - 99;
+		let routeOperation, routeDestination, detouring = false, lastPolice = 0, lastSnatch = - 99, lastGas = - 99, lastDown = - 99, lastSpeakerRecall = 0;
 		let exit: Sdk.Point, phase = 'stand', pendingId = 0, mobileSequence = 0, mobileScheduled = false;
 		const chasing = new Set<string>(), waiting = new Map<string, Sdk.MapMarker>();
 		const mobileCars: any[] = [];
@@ -52,7 +53,11 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 			ctx.timeline.after( seconds, () => { waiting.delete( id ); ctx.presentation.markers( [ ...waiting.values() ] ); action(); } );
 
 		};
-		const chase = ( ctx, id, at ) => ctx.commands.execute( 'arrest', { at, radius: 14, selection: [ ctx.actors.resolve( id ) ] } );
+		const chase = ( ctx, id, at ) => {
+
+			return ctx.commands.execute( 'arrest', { at: grid12( at ), aim: at, radius: 14, retarget: true, selection: [ ctx.actors.resolve( id ) ] } );
+
+		};
 		const ahead = ( ctx, lead = 110 ) => {
 
 			const speaker = ctx.protected.get( run.speaker ), progress = ROUTE.project( speaker.position ?? STAND );
@@ -61,7 +66,7 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 		};
 		const lunge = ( ctx, mobile, delay ) => {
 
-			if ( mobile.chasing || mobile.pendingLunge || ! mobile.crew ) return;
+			if ( mobile.chasing || mobile.pendingLunge || mobile.snatchPending || ! mobile.crew ) return;
 			const go = () => {
 
 				mobile.pendingLunge = false;
@@ -71,7 +76,7 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 
 					mobile.chasing = false;
 					const position = ctx.protected.get( run.speaker ).position;
-					if ( position && ctx.protected.get( run.speaker ).state !== 'aboard' ) ctx.movement.move( mobile.crew, position, { radius: 14 } );
+					if ( position && ctx.protected.get( run.speaker ).state !== 'aboard' ) ctx.movement.move( mobile.crew, grid12( position ) );
 
 				} );
 
@@ -89,17 +94,22 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 			void operation.settled.then( ( outcome ) => {
 
 				if ( outcome.status !== 'completed' || ctx.signal.aborted ) return;
-				const vehicle = ctx.vehicles.get( outcome.value ); let target;
-				if ( task === 'car' ) target = ctx.vehicles.get( run.car ).position;
-				else {
+				ctx.timeline.after( 1.5, () => {
 
-					const initial = ahead( ctx, 50 ), approach = ctx.spatial.roadRoute( origin, initial );
-					const intercept = ahead( ctx, approach ? 50 + approach.length / 9 * 1.7 : 110 );
-					target = ctx.spatial.walkable( intercept, 20 ) ?? intercept;
+					if ( ctx.signal.aborted ) return;
+					const vehicle = ctx.vehicles.get( outcome.value ); let target;
+					if ( task === 'car' ) target = ctx.vehicles.get( run.car ).position;
+					else {
 
-				}
-				const driven = ctx.vehicles.drive( vehicle.handle, target, { expectedRevision: vehicle.revision } );
-				if ( driven.status === 'completed' ) mobileCars.push( { handle: vehicle.handle, task, goal: target, goalProgress: ROUTE.project( target ), deployed: false, crew: null, lastMove: ctx.time, chasing: false, pendingLunge: false } );
+						const initial = ahead( ctx ), approach = ctx.spatial.roadRoute( origin, initial );
+						const intercept = ahead( ctx, approach ? 50 + approach.length / 9 * 1.7 : 110 );
+						target = ctx.spatial.walkable( intercept, 20 ) ?? intercept;
+
+					}
+					const driven = ctx.vehicles.drive( vehicle.handle, target, { expectedRevision: vehicle.revision } );
+					if ( driven.status === 'completed' ) mobileCars.push( { handle: vehicle.handle, task, goal: target, goalProgress: ROUTE.project( target ), deployed: false, crew: null, lastMove: ctx.time, chasing: false, pendingLunge: false, snatchPending: false } );
+
+				} );
 
 			} );
 
@@ -166,7 +176,7 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 			for ( const actor of attackers ) {
 
 				assaults.set( actor.id, { actor, target: target.handle, aimT: ctx.time, aiming: null } );
-				ctx.actors.configure( actor, { speed: 1.7 } ); ctx.crowd.setMode( actor, 'push' ); aimAssault( ctx, assaults.get( actor.id ) );
+				ctx.actors.configure( actor, { speed: 1.7 } ); ctx.crowd.setMode( actor, 'push' ); ctx.crowd.recall( actor, 0.6 ); aimAssault( ctx, assaults.get( actor.id ) );
 
 			}
 			ctx.opinion.adjust( - 2, 'AntiFa attack the police' );
@@ -244,7 +254,7 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 								.filter( ( actor ) => actor?.alive > 5 && ! brokenTargets.has( actor.handle.id ) ).map( ( actor ) => actor.handle );
 							if ( ! selection.length ) return;
 							const radius = Math.max( 20, Math.min( 45, Math.sqrt( crowd.count / 1.6 / Math.PI ) ) );
-							ctx.commands.execute( 'kettle', { at: crowd.center, selection, radius } );
+							ctx.commands.execute( 'kettle', { at: crowd.center, selection, radius, tighten: 0.8 } );
 
 						} );
 
@@ -267,6 +277,11 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 				const speaker = ctx.protected.get( run.speaker ), car = ctx.vehicles.get( run.car );
 				run.speakerState = speaker.state; run.position = speaker.position ?? run.position;
 				run.capture = speaker.capture;
+				if ( speaker.actor && [ 'active', 'carried' ].includes( speaker.state ) && ctx.time - lastSpeakerRecall > 5 ) {
+
+					lastSpeakerRecall = ctx.time; ctx.crowd.recall( speaker.actor, 0.8 );
+
+				}
 				const policeNear = speaker.position ? ctx.spatial.count( { at: speaker.position, radius: 15, faction: 'police' } ) : null;
 				if ( policeNear !== null ) run.policeNear = policeNear;
 				mobileTick( ctx, speaker );
@@ -275,7 +290,8 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 
 					const carrier = sample.people.filter( ( person ) => friendly.includes( person.actor.id ) && person.actor.id !== 'medics' && person.status === 'active' && distance( person.position, speaker.position ) < 8 )
 						.sort( ( first, second ) => distance( first.position, speaker.position ) - distance( second.position, speaker.position ) )[ 0 ];
-					if ( carrier && ctx.protected.transfer( run.speaker, { carrier: carrier.handle, expectedRevision: speaker.revision, expectedSample: sample.sequence, promote: true, radius: 8 } ).status === 'completed' ) {
+					if ( carrier && ctx.protected.transfer( run.speaker, { carrier: carrier.handle, expectedRevision: speaker.revision, expectedSample: sample.sequence,
+						promote: true, radius: 8, joinGroup: { speed: 0.85 } } ).status === 'completed' ) {
 
 						run.carried = true; run.carriers ++; if ( run.escaping ) move( ctx );
 
@@ -331,8 +347,9 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 			update( ctx ) {
 
 				if ( ! ctx.observation || ctx.time - lastPolice < 3 ) return; lastPolice = ctx.time;
+				const speaker = ctx.protected.get( run.speaker );
 				if ( ! chargeStarted && ctx.time >= 67 ) beginCharge( ctx );
-				const speaker = ctx.protected.get( run.speaker ); if ( ! speaker.position || [ 'aboard', 'exited' ].includes( speaker.state ) ) return;
+				if ( ! speaker.position || [ 'aboard', 'exited' ].includes( speaker.state ) ) return;
 				if ( speaker.state !== 'down' ) {
 
 					for ( const id of chasing ) { const squad = ctx.actors.get( ctx.actors.resolve( id ) ); if ( squad?.alive > 5 ) chase( ctx, id, speaker.position ); }
@@ -349,18 +366,44 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 				}
 				if ( speaker.state !== 'down' && ctx.time >= 75 && ctx.time - lastSnatch >= ( run.escaping ? 25 : 35 ) ) {
 
-					const available = police.filter( ( entry ) => entry.id.startsWith( 'snatcher-' ) || entry.id.startsWith( 'reserve-' ) )
-						.map( ( entry ) => ctx.actors.get( ctx.actors.resolve( entry.id ) ) ).filter( ( actor ) => actor?.center && actor.alive > 5 && ! chasing.has( actor.handle.id ) && distance( actor.center, speaker.position ) < 260 )
-						.sort( ( first, second ) => distance( first.center, speaker.position ) - distance( second.center, speaker.position ) );
-					if ( available.length ) { lastSnatch = ctx.time; const id = available[ 0 ].handle.id;
-						tell( ctx, speaker.position, 10, `${id} for the Speaker`, 5, () => { chasing.add( id ); chase( ctx, id, ctx.protected.get( run.speaker ).position ?? speaker.position );
-							ctx.timeline.after( 45, () => { chasing.delete( id ); const at = ctx.protected.get( run.speaker ).position; if ( at ) ctx.movement.move( ctx.actors.resolve( id ), at ); } ); } ); }
+						const available = [
+							...police.filter( ( entry ) => entry.id.startsWith( 'snatcher-' ) || entry.id.startsWith( 'reserve-' ) )
+								.map( ( entry ) => ( { actor: ctx.actors.get( ctx.actors.resolve( entry.id ) ), radius: 260, mobile: null } ) ),
+							...mobileCars.filter( ( mobile ) => mobile.deployed && mobile.crew && ! mobile.chasing && ! mobile.pendingLunge && ! mobile.snatchPending )
+								.map( ( mobile ) => ( { actor: ctx.actors.get( mobile.crew ), radius: 60, mobile } ) ),
+						].filter( ( entry ) => entry.actor?.center && entry.actor.alive > 5 && ! chasing.has( entry.actor.handle.id ) )
+							.map( ( entry ) => ( { ...entry, distance: distance( entry.actor.center, speaker.position ) } ) )
+							.filter( ( entry ) => entry.distance < entry.radius )
+							.sort( ( first, second ) => first.distance - second.distance );
+
+						if ( available.length ) {
+							lastSnatch = ctx.time; const { actor, mobile } = available[ 0 ], id = actor.handle.id;
+							if ( mobile ) mobile.snatchPending = true;
+							tell( ctx, speaker.position, 10, `${id} for the Speaker`, 5, () => {
+
+								if ( mobile ) { mobile.snatchPending = false; mobile.chasing = true; } else chasing.add( id );
+								chase( ctx, id, ctx.protected.get( run.speaker ).position ?? speaker.position );
+								ctx.timeline.after( 45, () => {
+
+									if ( mobile ) mobile.chasing = false; else chasing.delete( id );
+									const current = ctx.protected.get( run.speaker );
+									const at = run.escaping && current.state !== 'aboard' && current.position ? grid12( current.position )
+										: mobile ? ctx.actors.get( mobile.crew )?.center : police.find( ( entry ) => entry.id === id )?.at;
+									if ( at ) ctx.movement.move( ctx.actors.resolve( id ), at );
+
+								} );
+
+							} );
+						}
 
 				}
 				if ( ctx.time - lastGas > 40 && ctx.resources.get( 'gas' ).available ) for ( const id of chasing ) {
 
 					const squad = ctx.actors.get( ctx.actors.resolve( id ) );
-					if ( ! squad?.center || distance( squad.center, speaker.position ) >= 50 || ( ctx.spatial.count( { at: squad.center, radius: 15, faction: 'protester' } ) ?? 0 ) < 80 ) continue;
+					if ( ! squad?.center ) continue;
+					const distanceToSpeaker = distance( squad.center, speaker.position ); if ( distanceToSpeaker >= 50 ) continue;
+					const protestersNearby = ctx.spatial.count( { at: squad.center, radius: 15, faction: 'protester' } );
+					if ( ( protestersNearby ?? 0 ) < 80 ) continue;
 					lastGas = ctx.time; const at = squad.center.map( ( value, axis ) => value + ( speaker.position[ axis ] - value ) * 0.6 );
 					tell( ctx, at, 20, 'tear gas', 6, () => { void ctx.commands.execute( 'gas', { at: [ at[ 0 ], at[ 1 ] ], opinion: { delta: 1.5, reason: 'tear gas on camera' } } ); } ); break;
 
@@ -413,16 +456,25 @@ export default ( { defineScenario, defineBehavior, defineOutcome, landmark, plac
 
 					const outcome = await operation.settled;
 					if ( outcome.status !== 'completed' ) throw new Error( `Rescue actor ${options.id} allocation failed` );
-					ctx.actors.configure( outcome.value, { closed: true, ...( options.id === 'speaker' ? { parting: true } : {} ) } );
+					ctx.actors.configure( outcome.value, { closed: true, ...( options.id === 'speaker' ? { parting: true, leaderSuccession: false } : {} ) } );
 
 				}
 
 			}
-			for ( const squad of police ) ctx.spawn.squad( squad );
+			for ( const squad of police ) {
+
+				const operation = ctx.spawn.squad( squad );
+				if ( ! squad.id.startsWith( 'snatcher-' ) ) continue;
+				const outcome = await operation.settled;
+				if ( outcome.status !== 'completed' ) throw new Error( `Rescue actor ${squad.id} allocation failed` );
+				ctx.actors.configure( outcome.value, { speed: 1.45 } );
+
+			}
 			const car = await ctx.spawn.vehicle( { id: 'rescue-car', label: 'Rescue car', at: PICKUPS[ 0 ], capacity: 2, selectable: false } ).settled;
 			if ( car.status !== 'completed' ) throw new Error( 'Rescue car allocation failed' ); run.car = car.value;
 			run.speaker = ctx.protected.create( { id: 'speaker-person', kind: 'person', label: 'Speaker', carrier: 'speaker',
-				protection: { friendly, hostile: police.map( ( squad ) => squad.id ), radius: 2.5, downRadius: 8, seconds: 4, downSeconds: 8, minimum: 2, downMinimum: 4, advantage: 2, recoveryMinimum: 4 } } );
+				protection: { friendly, hostile: police.map( ( squad ) => squad.id ), radius: 2.5, downRadius: 8, seconds: 4, downSeconds: 8, minimum: 2, downMinimum: 4,
+					advantage: 2, recoveryMinimum: 4, captureRate: { perHostile: 0.5, maximum: 2, shieldMultiplier: 0.5 } } } );
 			ctx.spawn.bystanders( { id: 'onlookers', people: 800, destinations: [ 'preseren', 'square', 'metelkova', 'railway', 'tivoli', 'mestni', 'dragon' ] } );
 
 		}, behaviors: [ behavior( { id: 'rescue' } ) ],

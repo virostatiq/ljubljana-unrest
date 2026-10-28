@@ -212,6 +212,16 @@ class Game {
 
 	async load( M ) {
 
+		const seed = import.meta.env.DEV ? Number( new URLSearchParams( location.search ).get( 'seed' ) ) : NaN;
+		const seededState = Number.isInteger( seed ) && seed >= 0 && seed <= 0xffffffff ? { value: seed || 0x6d2b79f5 } : null;
+		if ( seededState ) Math.random = () => {
+
+			let value = seededState.value;
+			value ^= value << 13; value ^= value >>> 17; value ^= value << 5;
+			seededState.value = value >>> 0;
+			return seededState.value / 0x100000000;
+
+		};
 		boot.textContent = 'computing routes…';
 		M.prepare?.( this.city ); // a mission may change the map data first (a fence); each mission is a fresh page load
 		this.flow = new FlowFields( this.city );
@@ -225,6 +235,7 @@ class Game {
 		this.aiming = null;
 		this.mission = new M( this );
 		this.world.standoff.exempt = this.mission.side === 'protest' ? [ FACTION.PROTESTER ] : []; // the player's own groups
+		if ( seededState ) seededState.value = seed || 0x6d2b79f5;
 		await this.mission.setup();
 		this.crowd.upload();
 		this.world.started = true;

@@ -2,8 +2,18 @@ import { check, fields } from './definition.ts';
 
 export function protectionRules( options ) {
 
-	fields( options, [ 'friendly', 'hostile', 'radius', 'downRadius', 'seconds', 'downSeconds', 'minimum', 'downMinimum', 'advantage', 'recoveryMinimum' ], 'protection' );
+	fields( options, [ 'friendly', 'hostile', 'radius', 'downRadius', 'seconds', 'downSeconds', 'minimum', 'downMinimum', 'advantage', 'recoveryMinimum', 'captureRate' ], 'protection' );
 	const rules: Record<string, any> = { radius: 8, seconds: 4, downSeconds: 8, minimum: 2, downMinimum: 4, advantage: 2, recoveryMinimum: 4, ...options };
+	if ( options.captureRate !== undefined ) {
+
+		fields( options.captureRate, [ 'perHostile', 'maximum', 'shieldMultiplier' ], 'protection.captureRate' );
+		const captureRate = { perHostile: 0.5, maximum: 2, shieldMultiplier: 0.5, ...options.captureRate };
+		for ( const key of [ 'perHostile', 'maximum' ] ) check( Number.isFinite( captureRate[ key ] ) && captureRate[ key ] > 0 && captureRate[ key ] <= 10, `protection.captureRate.${key}`, 'must be positive, finite and at most 10' );
+		check( Number.isFinite( captureRate.shieldMultiplier ) && captureRate.shieldMultiplier >= 0 && captureRate.shieldMultiplier <= 1,
+			'protection.captureRate.shieldMultiplier', 'must be between zero and one' );
+		rules.captureRate = Object.freeze( captureRate );
+
+	}
 	rules.downRadius ??= rules.radius;
 	for ( const key of [ 'friendly', 'hostile' ] ) {
 
@@ -19,7 +29,7 @@ export function protectionRules( options ) {
 
 }
 
-export function captureState( entity, rules, people, available, elapsed ) {
+export function captureState( entity, rules, people, available, elapsed, shielded = false ) {
 
 	check( Number.isFinite( elapsed ) && elapsed >= 0, 'protection.elapsed', 'must be non-negative and finite' );
 	const down = entity.state === 'down';
@@ -39,7 +49,9 @@ export function captureState( entity, rules, people, available, elapsed ) {
 
 	}
 	const pressure = hostile >= ( down ? rules.downMinimum : rules.minimum ) && hostile * ( down ? 1 : rules.advantage ) > friendly;
-	const held = pressure ? Math.min( required, ( entity.capture?.held ?? 0 ) + elapsed )
+	const rate = ! down && rules.captureRate ? Math.min( rules.captureRate.maximum, hostile * rules.captureRate.perHostile )
+		* ( shielded ? rules.captureRate.shieldMultiplier : 1 ) : 1;
+	const held = pressure ? Math.min( required, ( entity.capture?.held ?? 0 ) + elapsed * rate )
 		: down ? 0 : Math.max( 0, ( entity.capture?.held ?? 0 ) - elapsed );
 	return Object.freeze( { held, required, pressure, available: true, friendly, hostile } );
 

@@ -46,6 +46,7 @@ export class BehaviorHost {
 				crowd: Object.freeze( {
 					setMode: ( actor, mode ) => { this.writable( instance ); return this.runtime.context.crowd.setMode( actor, mode ); },
 					nudge: ( actor, options ) => { this.writable( instance ); return this.runtime.context.crowd.nudge( actor, options ); },
+					recall: ( actor, floor ) => { this.writable( instance ); return this.runtime.context.crowd.recall( actor, floor ); },
 					setMorale: ( actor, morale ) => { this.writable( instance ); return this.runtime.context.crowd.setMorale( actor, morale ); },
 				} ),
 				presentation: Object.freeze( { markers: ( markers ) => {

@@ -34,6 +34,21 @@ test( 'standing capture pressure decays while downed capture resets without enou
 
 } );
 
+test( 'protection capture rate scales with officer count and slows under shield wall', () => {
+
+	const captureRules = protectionRules( { friendly: [ 'escort' ], hostile: [ 'pursuers' ],
+		captureRate: { perHostile: 0.5, maximum: 2, shieldMultiplier: 0.5 } } );
+	const entity = { state: 'active', position: [ 0, 0 ], capture: null };
+	const twoOfficers = [ person( 'police-1', 'pursuers' ), person( 'police-2', 'pursuers' ) ];
+	const fourOfficers = [ ...twoOfficers, person( 'police-3', 'pursuers' ), person( 'police-4', 'pursuers' ) ];
+	assert.equal( captureState( entity, captureRules, twoOfficers, available, 1 ).held, 1 );
+	assert.equal( captureState( entity, captureRules, fourOfficers, available, 1 ).held, 2 );
+	assert.equal( captureState( entity, captureRules, fourOfficers, available, 1, true ).held, 1 );
+	entity.state = 'down';
+	assert.equal( captureState( entity, captureRules, fourOfficers, available, 1 ).held, 1 );
+
+} );
+
 test( 'unavailable actors freeze pressure rather than being treated as empty', () => {
 
 	const entity = { state: 'down', position: [ 0, 0 ], capture: { held: 5 } };
